@@ -10,6 +10,8 @@ Commands
 - `uv run manage.py test` — the whole suite
 - `uv run manage.py test chores.tests` — one test module
 - `uv run ruff check . && uv run ruff format --check .` — lint and format check, run it before committing
+- `uv run ruff check . --fix` — auto-fix lint
+- `uv run ruff format .` — auto-format files
 
 Rules
 
