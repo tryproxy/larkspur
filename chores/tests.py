@@ -1,3 +1,6 @@
 from django.test import TestCase
 
-# Create your tests here.
+
+class ProjectSmokeTest(TestCase):
+    def test_project_loads(self):
+        self.assertTrue(True)
