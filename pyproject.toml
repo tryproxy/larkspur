@@ -11,6 +11,11 @@ dependencies = [
     "django==6.1.1",
 ]
 
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
 [project.scripts]
 larkspur = "larkspur:main"
 
