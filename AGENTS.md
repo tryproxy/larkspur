@@ -2,6 +2,10 @@ Household chore rotation Django app: assign by who did that chore longest ago. S
 
 Work is GitHub issues on this repo. Code intelligence is in `.codegraph/`; use Codegraph before grep/read for symbols and call paths.
 
+Documents
+
+- `_docs/process.md` - how work is organized
+
 Commands
 
 - `uv sync` — install dependencies
