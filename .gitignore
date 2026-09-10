@@ -13,6 +13,7 @@ build/
 *.swp
 .cursor/
 .venv/
+.ruff_cache/
 __pycache__/
 *.py[cod]
 *.sqlite3
