@@ -4,10 +4,12 @@ Work is GitHub issues on this repo. Code intelligence is in `.codegraph/`; use C
 
 Commands
 
-```bash
-uv run python manage.py test
-uv run python manage.py runserver
-```
+- `uv sync` — install dependencies
+- `uv run manage.py runserver` — dev server
+- `uv run manage.py migrate` — apply migrations
+- `uv run manage.py test` — the whole suite
+- `uv run manage.py test chores.tests` — one test module
+- `uv run ruff check . && uv run ruff format --check .` — lint and format check, run it before committing
 
 Rules
 
