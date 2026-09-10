@@ -26,10 +26,27 @@ Payout is derived, not stored as a ticking row:
 
 ## Surfaces
 
-Three HTMX pages, Django templates, session auth:
+Three HTMX pages, Django templates, Alpine.js, session auth:
 
 - **My slots** — mark done, skip to the board.
 - **Bounty board** — live payout, first other resident claims.
 - **Ledger** — who owes whom.
 
 Admin stays for seed and catalog. Period open and overdue listing can be management commands.
+
+## Stack
+
+| Concern | Choice |
+|---|---|
+| Language / framework | Python 3.12, Django 6.1 |
+| Database | SQLite |
+| Templates / interactivity | Django templates + HTMX + Alpine.js |
+| Styling | Django templates |
+| Auth | Django session auth |
+| Background jobs | `manage.py` commands (open week, overdue → board) |
+| Money | `DecimalField`, payout computed on read |
+| Admin / seed | Django admin + fixtures |
+| Tests / lint | `manage.py test`, ruff |
+| Deploy | Fly.io or Railway — one `web` process |
+
+One repo, one deploy pipeline, one `web` process. No worker, no Redis.

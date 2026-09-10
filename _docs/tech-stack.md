@@ -1,13 +1,18 @@
 # Tech stack
 
-Минимум под `_docs/plan.md`.
+## Stack
 
-- Python 3.12, uv, `.venv`
-- Django 6.1, SQLite
-- Django ORM, `DecimalField` для денег
-- Django templates + HTMX
-- Django admin для сида
-- `manage.py` команды: открыть неделю, просрочка на доску
-- `manage.py test`
+| Concern | Choice |
+|---|---|
+| Language / framework | Python 3.12, Django 6.1 |
+| Database | SQLite |
+| Templates / interactivity | Django templates + HTMX + Alpine.js |
+| Styling | Django templates |
+| Auth | Django session auth |
+| Background jobs | `manage.py` commands (open week, overdue → board) |
+| Money | `DecimalField`, payout computed on read |
+| Admin / seed | Django admin + fixtures |
+| Tests / lint | `manage.py test`, ruff |
+| Deploy | Fly.io or Railway — one `web` process |
 
-Баунти считать при чтении. Без Postgres, Redis, Celery, DRF, React, Stripe.
+One repo, one deploy pipeline, one `web` process. No worker, no Redis.
