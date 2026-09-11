@@ -6,6 +6,11 @@ Documents
 
 - `_docs/process.md` - how work is organized
 
+Background
+
+- `_docs/decisions.md` - the calls already made, with reasons. Read it before grooming or implementing, and do not reopen a decision without changing it there first
+- `_docs/archived/` - holds the plan, architecture, and original task list. They are reference, not the backlog - when they disagree with `decisions.md` or an issue, they lose
+
 Commands
 
 - `uv sync` — install dependencies
