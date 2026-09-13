@@ -1,15 +1,13 @@
-Household chore rotation Django app: assign by who did that chore longest ago. Skip or overdue lists a **fixed-start bounty** that rises daily. The neighbor who claims it is owed an IOU. No auctions, no real payments, no custom prices.
+Django household chore rotation app. Work is tracked in GitHub issues.
 
-Work is GitHub issues on this repo. Code intelligence is in `.codegraph/`; use Codegraph before grep/read for symbols and call paths.
+Use CodeGraph before text search when locating code symbols or call paths.
 
-Documents
+Required context
 
-- `_docs/process.md` - how work is organized
-
-Background
-
-- `_docs/decisions.md` - the calls already made, with reasons. Read it before grooming or implementing, and do not reopen a decision without changing it there first
-- `_docs/archived/` - holds the plan, architecture, and original task list. They are reference, not the backlog - when they disagree with `decisions.md` or an issue, they lose
+- Before working an issue, read `_docs/process.md`.
+- Before grooming, implementing, or reviewing, read `_docs/decisions.md`.
+- If an issue conflicts with a decision, stop and report it. Continue after either is corrected.
+- Read `_docs/archived/` only when linked or needed for missing context. It is reference only; decisions and issues win.
 
 Commands
 
@@ -25,10 +23,4 @@ Commands
 Rules
 
 - Dependencies are added in `pyproject.toml`. Do not add one without asking
-- One Django app: `chores`. Keep domain rules next to models / small service functions.
-- Bounty start lives on the chore catalog. Daily rate lives on the household.
-- `к_оплате = start × (1 + daily_rate × days_on_board)`; listing day is 0 days.
-- Empty last-done history = resident join date, not “never”.
-- Assignee cannot claim their own bounty. First other resident wins.
-- Completing on time creates no IOU. Claim freezes the payout into one ledger row.
 - Prefer a passing test with each issue. Do not commit `.venv` or `db.sqlite3`.
