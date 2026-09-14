@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My slots</title>
+  </head>
+  <body>
+    <main>
+      <h1>My slots</h1>
+      <p>{{ resident.display_name }}</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Chore</th>
+            <th scope="col">Period</th>
+            <th scope="col">Deadline</th>
+            <th scope="col">Status</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="my-slots-rows">
+          {% for slot in slots %}
+            {% include "chores/partials/my_slot_row.html" with slot=slot %}
+          {% empty %}
+            <tr>
+              <td colspan="5">You have no current slots.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+{% if slot.status == "assigned" or slot.status == "claimed" %}<tr id="slot-row-{{ slot.pk }}" data-slot-id="{{ slot.pk }}">
+    <td data-field="chore">{{ slot.chore.name }}</td>
+    <td data-field="period">
+      {{ slot.period.start_date|date:"Y-m-d" }} to {{ slot.period.end_date|date:"Y-m-d" }}
+    </td>
+    <td data-field="deadline">{{ slot.deadline|date:"Y-m-d" }}</td>
+    <td data-field="status">
+      <span data-status="{{ slot.status }}">{{ slot.get_status_display }}</span>
+    </td>
+    <td data-field="actions">
+      <form
+        method="post"
+        action="{% url 'my-slot-done' slot_id=slot.pk %}"
+        hx-post="{% url 'my-slot-done' slot_id=slot.pk %}"
+        hx-target="#slot-row-{{ slot.pk }}"
+        hx-swap="delete"
+      >
+        {% csrf_token %}
+        <button type="submit">Done</button>
+      </form>
+      <form
+        method="post"
+        action="{% url 'my-slot-skip' slot_id=slot.pk %}"
+        hx-post="{% url 'my-slot-skip' slot_id=slot.pk %}"
+        hx-target="#slot-row-{{ slot.pk }}"
+        hx-swap="delete"
+      >
+        {% csrf_token %}
+        <button type="submit">Skip</button>
+      </form>
+    </td>
+  </tr>{% endif %}

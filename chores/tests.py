@@ -10,7 +10,8 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import close_old_connections, connection
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import Client, TestCase, TransactionTestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
@@ -34,6 +35,271 @@ User = get_user_model()
 class ProjectSmokeTest(TestCase):
     def test_project_loads(self):
         self.assertTrue(True)
+
+
+class MySlotsViewTests(TestCase):
+    action_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.assignee = self.make_resident("my-slots-assignee", "Assignee")
+        self.other_resident = self.make_resident("my-slots-other", "Other")
+        foreign_household = Household.objects.create(daily_rate=Decimal(0))
+        self.foreign_resident = Resident.objects.create(
+            household=foreign_household,
+            user=User.objects.create_user(username="my-slots-foreign"),
+            display_name="Foreign",
+            join_date=date(2026, 9, 3),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.client = Client()
+
+    def make_resident(self, username, display_name):
+        return Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username=username),
+            display_name=display_name,
+            join_date=date(2026, 9, 1),
+        )
+
+    def make_chore(self, name, household=None):
+        return Chore.objects.create(
+            household=household or self.household,
+            name=name,
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+
+    def make_slot(
+        self,
+        name,
+        *,
+        status=Slot.Status.ASSIGNED,
+        original_assignee=None,
+        current_holder=None,
+        period=None,
+        household=None,
+    ):
+        original_assignee = original_assignee or self.assignee
+        if current_holder is None and status in (
+            Slot.Status.ASSIGNED,
+            Slot.Status.DONE,
+        ):
+            current_holder = original_assignee
+        elif current_holder is None and status == Slot.Status.CLAIMED:
+            current_holder = self.other_resident
+
+        period = period or self.period
+        chore = self.make_chore(name, household=household)
+        listed_at = (
+            self.action_at
+            if status in (Slot.Status.BOUNTY, Slot.Status.CLAIMED)
+            else None
+        )
+        return Slot.objects.create(
+            period=period,
+            chore=chore,
+            original_assignee=original_assignee,
+            current_holder=current_holder,
+            status=status,
+            deadline=period.end_date,
+            listed_at=listed_at,
+            completed_by=(original_assignee if status == Slot.Status.DONE else None),
+        )
+
+    def login_as(self, resident):
+        self.client.force_login(resident.user)
+
+    def snapshot(self, slot):
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        return (
+            saved_slot.status,
+            saved_slot.current_holder_id,
+            saved_slot.completed_by_id,
+            saved_slot.listed_at,
+            list(
+                CompletionHistory.objects.order_by("pk").values_list(
+                    "pk",
+                    "resident_id",
+                    "chore_id",
+                    "last_done_at",
+                )
+            ),
+            list(IOU.objects.order_by("pk").values_list("pk", "slot_id")),
+        )
+
+    def test_authenticated_resident_sees_only_current_household_slots(self):
+        assigned = self.make_slot("Assigned chore")
+        claimed = self.make_slot(
+            "Claimed chore",
+            status=Slot.Status.CLAIMED,
+            original_assignee=self.other_resident,
+            current_holder=self.assignee,
+        )
+        self.make_slot(
+            "Other holder chore",
+            status=Slot.Status.CLAIMED,
+            original_assignee=self.assignee,
+            current_holder=self.other_resident,
+        )
+        self.make_slot("Bounty chore", status=Slot.Status.BOUNTY)
+        self.make_slot("Done chore", status=Slot.Status.DONE)
+
+        foreign_household = self.foreign_resident.household
+        foreign_period = Period.objects.create(
+            household=foreign_household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.make_slot(
+            "Foreign chore",
+            period=foreign_period,
+            household=foreign_household,
+            original_assignee=self.foreign_resident,
+        )
+
+        self.login_as(self.assignee)
+        response = self.client.get(reverse("my-slots"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, assigned.chore.name)
+        self.assertContains(response, claimed.chore.name)
+        self.assertContains(response, "2026-09-14 to 2026-09-21")
+        self.assertContains(response, "2026-09-21")
+        self.assertContains(response, 'data-status="assigned"')
+        self.assertContains(response, 'data-status="claimed"')
+        self.assertContains(response, f'id="slot-row-{assigned.pk}"')
+        self.assertContains(response, f'id="slot-row-{claimed.pk}"')
+        for hidden_name in (
+            "Other holder chore",
+            "Bounty chore",
+            "Done chore",
+            "Foreign chore",
+        ):
+            with self.subTest(hidden_name=hidden_name):
+                self.assertNotContains(response, hidden_name)
+
+    def test_done_completes_slot_and_returns_row_removal_fragment(self):
+        slot = self.make_slot("Complete this")
+        self.login_as(self.assignee)
+
+        with patch("chores.views.timezone.now", return_value=self.action_at):
+            response = self.client.post(
+                reverse("my-slot-done", args=[slot.pk]),
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"")
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.DONE)
+        self.assertEqual(saved_slot.completed_by_id, self.assignee.pk)
+        history = CompletionHistory.objects.get(
+            resident=self.assignee,
+            chore=slot.chore,
+        )
+        self.assertEqual(history.last_done_at, self.action_at)
+        self.assertEqual(IOU.objects.count(), 0)
+
+    def test_skip_lists_slot_and_returns_row_removal_fragment(self):
+        slot = self.make_slot("Skip this")
+        self.login_as(self.assignee)
+
+        with patch("chores.views.timezone.now", return_value=self.action_at):
+            response = self.client.post(
+                reverse("my-slot-skip", args=[slot.pk]),
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"")
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.BOUNTY)
+        self.assertIsNone(saved_slot.current_holder_id)
+        self.assertEqual(saved_slot.listed_at, self.action_at)
+        self.assertEqual(IOU.objects.count(), 0)
+
+    def test_non_holder_and_cross_household_actions_are_forbidden_without_mutation(
+        self,
+    ):
+        slot = self.make_slot("Protected slot")
+        before = self.snapshot(slot)
+
+        for resident in (self.other_resident, self.foreign_resident):
+            with self.subTest(resident=resident.display_name):
+                self.login_as(resident)
+                response = self.client.post(
+                    reverse("my-slot-done", args=[slot.pk]),
+                    HTTP_HX_REQUEST="true",
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(self.snapshot(slot), before)
+
+    def test_unauthenticated_requests_cannot_view_or_mutate(self):
+        slot = self.make_slot("Login required")
+        before = self.snapshot(slot)
+
+        get_response = self.client.get(reverse("my-slots"))
+        post_response = self.client.post(reverse("my-slot-done", args=[slot.pk]))
+
+        self.assertEqual(get_response.status_code, 302)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_authenticated_user_without_resident_mapping_is_forbidden(self):
+        user = User.objects.create_user(username="my-slots-unmapped")
+        self.client.force_login(user)
+        slot = self.make_slot("Unmapped actor target")
+        before = self.snapshot(slot)
+
+        get_response = self.client.get(reverse("my-slots"))
+        post_response = self.client.post(reverse("my-slot-done", args=[slot.pk]))
+
+        self.assertEqual(get_response.status_code, 403)
+        self.assertEqual(post_response.status_code, 403)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_missing_slot_is_not_found_without_mutation(self):
+        self.login_as(self.assignee)
+
+        response = self.client.post(reverse("my-slot-done", args=[999999]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Slot.objects.count(), 0)
+        self.assertEqual(CompletionHistory.objects.count(), 0)
+        self.assertEqual(IOU.objects.count(), 0)
+
+    def test_invalid_domain_transition_is_bad_request_without_mutation(self):
+        slot = self.make_slot("Already done", status=Slot.Status.DONE)
+        before = self.snapshot(slot)
+        self.login_as(self.assignee)
+
+        response = self.client.post(
+            reverse("my-slot-done", args=[slot.pk]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_invalid_csrf_token_is_rejected_before_mutation(self):
+        slot = self.make_slot("CSRF protected")
+        before = self.snapshot(slot)
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.assignee.user)
+
+        response = csrf_client.post(
+            reverse("my-slot-done", args=[slot.pk]),
+            {"csrfmiddlewaretoken": "invalid"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.snapshot(slot), before)
 
 
 class HouseholdAndResidentTests(TestCase):
