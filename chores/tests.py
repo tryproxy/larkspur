@@ -996,6 +996,123 @@ class ChoreCatalogTests(TestCase):
         self.assertFalse(Chore.objects.filter(pk=chore.pk).exists())
 
 
+class AdminSetupTests(TestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            username="admin",
+            password="admin-password-2026",
+        )
+        self.assertTrue(
+            self.client.login(
+                username=self.admin_user.username,
+                password="admin-password-2026",
+            )
+        )
+
+    def add_admin_record(self, url_name, data):
+        add_url = reverse(url_name)
+        add_response = self.client.get(add_url)
+        self.assertEqual(add_response.status_code, 200)
+
+        response = self.client.post(add_url, data, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.redirect_chain)
+        self.assertContains(response, "was added successfully.")
+
+    def test_admin_can_create_demo_household_residents_and_recurring_chores(self):
+        self.assertEqual(
+            self.client.get(reverse("admin:auth_user_add")).status_code,
+            200,
+        )
+
+        resident_users = []
+        for index in range(1, 4):
+            username = f"demo-resident-{index}"
+            self.add_admin_record(
+                "admin:auth_user_add",
+                {
+                    "username": username,
+                    "password1": "S9!pR4#xL8@k",
+                    "password2": "S9!pR4#xL8@k",
+                    "usable_password": "true",
+                },
+            )
+            resident_users.append(User.objects.get(username=username))
+
+        self.add_admin_record(
+            "admin:chores_household_add",
+            {"daily_rate": "0.0500"},
+        )
+        household = Household.objects.get()
+
+        for index, user in enumerate(resident_users, start=1):
+            self.add_admin_record(
+                "admin:chores_resident_add",
+                {
+                    "household": str(household.pk),
+                    "user": str(user.pk),
+                    "display_name": f"Demo Resident {index}",
+                    "join_date": f"2026-09-0{index}",
+                },
+            )
+
+        self.add_admin_record(
+            "admin:chores_chore_add",
+            {
+                "household": str(household.pk),
+                "name": "Clean kitchen",
+                "cadence": Chore.Cadence.WEEKLY,
+                "cadence_anchor": "",
+                "start_amount": "12.50",
+            },
+        )
+        self.add_admin_record(
+            "admin:chores_chore_add",
+            {
+                "household": str(household.pk),
+                "name": "Clean windows",
+                "cadence": Chore.Cadence.BIWEEKLY,
+                "cadence_anchor": "2026-09-14",
+                "start_amount": "25.00",
+            },
+        )
+
+        saved_household = Household.objects.get(pk=household.pk)
+        saved_residents = list(
+            Resident.objects.filter(household=saved_household).order_by("pk")
+        )
+        saved_chores = list(
+            Chore.objects.filter(household=saved_household).order_by("pk")
+        )
+
+        self.assertEqual(Household.objects.count(), 1)
+        self.assertEqual(saved_household.daily_rate, Decimal("0.0500"))
+        self.assertEqual(len(saved_residents), 3)
+        self.assertEqual(
+            [resident.user_id for resident in saved_residents],
+            [user.pk for user in resident_users],
+        )
+        self.assertEqual(
+            [resident.display_name for resident in saved_residents],
+            ["Demo Resident 1", "Demo Resident 2", "Demo Resident 3"],
+        )
+        self.assertEqual(
+            [resident.join_date for resident in saved_residents],
+            [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)],
+        )
+        self.assertEqual(len(saved_chores), 2)
+        self.assertEqual(
+            [chore.cadence for chore in saved_chores],
+            [Chore.Cadence.WEEKLY, Chore.Cadence.BIWEEKLY],
+        )
+        self.assertIsNone(saved_chores[0].cadence_anchor)
+        self.assertEqual(saved_chores[1].cadence_anchor, date(2026, 9, 14))
+        self.assertEqual(
+            [chore.start_amount for chore in saved_chores],
+            [Decimal("12.50"), Decimal("25.00")],
+        )
+
+
 class CompletionHistoryTests(TestCase):
     def setUp(self):
         self.household = Household.objects.create(daily_rate=Decimal(0))
