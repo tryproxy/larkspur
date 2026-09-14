@@ -183,6 +183,21 @@ class MySlotsViewTests(TestCase):
             with self.subTest(hidden_name=hidden_name):
                 self.assertNotContains(response, hidden_name)
 
+    def test_my_slots_page_loads_the_htmx_runtime(self):
+        self.login_as(self.assignee)
+
+        response = self.client.get(reverse("my-slots"))
+
+        self.assertContains(
+            response,
+            'src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js"',
+        )
+        self.assertContains(
+            response,
+            'integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V"',
+        )
+        self.assertContains(response, "defer")
+
     def test_done_completes_slot_and_returns_row_removal_fragment(self):
         slot = self.make_slot("Complete this")
         self.login_as(self.assignee)
