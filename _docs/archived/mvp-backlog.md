@@ -1,6 +1,8 @@
-# Backlog
+# MVP backlog
 
-Small Django slice for `_docs/plan.md`. App: `chores`. No auctions, no payments, no gamification.
+> Archived: original MVP backlog. Kept for historical context.
+
+Small Django slice based on [`plan.md`](./plan.md). App: `chores`. No auctions, no payments, no gamification.
 
 ## 1. Household models
 
