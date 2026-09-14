@@ -10,25 +10,29 @@ Labels
 
 Roles
 
+- Orchestrator - the main session; follows this lifecycle, coordinates the
+  `pm`, `engineer`, and `qa` agents, and does not perform their work
 - PM - grooms a task before anyone implements it, follows _docs/team/pm.md
 - Engineer - implements one groomed task, follows _docs/team/engineer.md
 - QA - checks the result, reports PASS or FAIL, and comments on FAIL; follows _docs/team/qa.md
 
-Orchestrator
-
-The main session is the orchestrator. It launches the PM, the engineer
-and QA as subagents. It follows _docs/team/orchestrator.md and does not groom,
-implement or test itself.
-
 Lifecycle
 
-1. Pick the next open issue from the backlog
+For issue selection:
+
+- Consider only open `mvp` issues whose listed dependencies are closed.
+- If multiple issues are eligible, choose the lowest issue number.
+- If the selected issue is blocked or conflicts with `_docs/decisions.md`, stop
+  and report it.
+- Stop when no eligible open `mvp` issues remain.
+
+1. Pick the next eligible issue using the rule above
 2. PM grooms it
 3. Engineer implements it
 4. QA verifies it
 5. On FAIL, back to step 3 with the QA comment as input
 6. On PASS, close the issue
-7. Repeat until the backlog is empty
+7. Repeat until no eligible open `mvp` issues remain
 
 Rules
 
