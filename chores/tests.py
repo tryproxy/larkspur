@@ -1,14 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
+from threading import Barrier
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import connection
-from django.test import TestCase, override_settings
+from django.db import close_old_connections, connection
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import (
@@ -19,6 +21,7 @@ from .models import (
     Resident,
     Slot,
     calculate_bounty_payout,
+    claim_bounty,
     complete_slot,
     skip_slot,
 )
@@ -845,6 +848,215 @@ class SlotSkipTests(TestCase):
         )
         self.assertTrue(timezone.is_aware(saved_slot.listed_at))
         self.assertEqual(saved_slot.listed_at, expected)
+
+
+class ClaimBountyTests(TransactionTestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.05"))
+        self.assignee = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="claim-assignee"),
+            display_name="Claim Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        self.neighbor = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="claim-neighbor"),
+            display_name="Claim Neighbor",
+            join_date=date(2026, 9, 2),
+        )
+        self.second_neighbor = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="claim-second-neighbor"),
+            display_name="Claim Second Neighbor",
+            join_date=date(2026, 9, 3),
+        )
+        foreign_household = Household.objects.create(daily_rate=Decimal(0))
+        self.foreign_resident = Resident.objects.create(
+            household=foreign_household,
+            user=User.objects.create_user(username="claim-foreign"),
+            display_name="Claim Foreign",
+            join_date=date(2026, 9, 4),
+        )
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+
+    def make_slot(self, status=Slot.Status.BOUNTY, period=None):
+        period = period or self.period
+        if status == Slot.Status.ASSIGNED:
+            current_holder = self.assignee
+            listed_at = None
+        elif status == Slot.Status.BOUNTY:
+            current_holder = None
+            listed_at = self.listed_at
+        elif status == Slot.Status.CLAIMED:
+            current_holder = self.neighbor
+            listed_at = self.listed_at
+        else:
+            current_holder = self.neighbor
+            listed_at = None
+
+        return Slot.objects.create(
+            period=period,
+            chore=self.chore,
+            original_assignee=self.assignee,
+            current_holder=current_holder,
+            status=status,
+            deadline=period.end_date,
+            listed_at=listed_at,
+        )
+
+    def snapshot(self, slot):
+        return Slot.objects.values_list(
+            "status",
+            "current_holder_id",
+            "original_assignee_id",
+            "listed_at",
+            "completed_by_id",
+        ).get(pk=slot.pk)
+
+    def assert_rejected_without_mutation(self, slot, resident):
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            claim_bounty(slot, resident)
+
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_valid_neighbor_claim_reloads_state_and_preserves_listing_data(self):
+        slot = self.make_slot()
+        slot.status = Slot.Status.ASSIGNED
+        slot.current_holder = self.assignee
+        slot.listed_at = None
+
+        claimed_slot = slot.claim(self.neighbor)
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(claimed_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(claimed_slot.current_holder_id, self.neighbor.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(saved_slot.current_holder_id, self.neighbor.pk)
+        self.assertEqual(saved_slot.original_assignee_id, self.assignee.pk)
+        self.assertEqual(saved_slot.listed_at, self.listed_at)
+        self.assertEqual(slot.listed_at, self.listed_at)
+
+        ledger_tables = {
+            table_name
+            for table_name in connection.introspection.table_names()
+            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
+        }
+        self.assertEqual(ledger_tables, set())
+
+    def test_assignee_cannot_claim_own_bounty(self):
+        slot = self.make_slot()
+
+        self.assert_rejected_without_mutation(slot, self.assignee)
+
+    def test_claimant_must_be_a_persisted_same_household_resident(self):
+        slot = self.make_slot()
+
+        self.assert_rejected_without_mutation(slot, self.foreign_resident)
+
+        for claimant in (Resident(pk=999999), Resident(display_name="Unsaved")):
+            with self.subTest(claimant=claimant):
+                self.assert_rejected_without_mutation(slot, claimant)
+
+    def test_non_bounty_or_unlisted_slots_are_rejected_without_mutation(self):
+        for index, status in enumerate(
+            (
+                Slot.Status.ASSIGNED,
+                Slot.Status.CLAIMED,
+                Slot.Status.DONE,
+            ),
+            start=1,
+        ):
+            with self.subTest(status=status):
+                period = Period.objects.create(
+                    household=self.household,
+                    start_date=self.period.start_date + timedelta(days=7 * index),
+                    end_date=self.period.end_date + timedelta(days=7 * index),
+                )
+                slot = self.make_slot(status=status, period=period)
+                self.assert_rejected_without_mutation(slot, self.neighbor)
+
+    def test_missing_slot_is_a_domain_failure(self):
+        with self.assertRaises(ValidationError):
+            claim_bounty(Slot(pk=999999), self.neighbor)
+
+    def test_second_claim_is_rejected_without_mutation(self):
+        slot = self.make_slot()
+        claim_bounty(slot, self.neighbor)
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            claim_bounty(slot, self.second_neighbor)
+
+        self.assertEqual(self.snapshot(slot), before)
+
+    @staticmethod
+    def _claim_from_separate_connection(barrier, slot_id, resident_id):
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            barrier.wait(timeout=10)
+            claim_bounty(Slot(pk=slot_id), Resident(pk=resident_id))
+        except ValidationError:
+            return "failure", resident_id
+        finally:
+            close_old_connections()
+
+        return "success", resident_id
+
+    def test_concurrent_claims_have_one_winner_and_no_loser_mutation(self):
+        slot = self.make_slot()
+        before = self.snapshot(slot)
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    self._claim_from_separate_connection,
+                    barrier,
+                    slot.pk,
+                    resident.pk,
+                )
+                for resident in (self.neighbor, self.second_neighbor)
+            ]
+            outcomes = [future.result() for future in futures]
+
+        self.assertEqual(
+            [outcome[0] for outcome in outcomes].count("success"),
+            1,
+            outcomes,
+        )
+        self.assertEqual(
+            [outcome[0] for outcome in outcomes].count("failure"),
+            1,
+        )
+        winner_id = next(
+            resident_id for outcome, resident_id in outcomes if outcome == "success"
+        )
+        loser_id = next(
+            resident_id for outcome, resident_id in outcomes if outcome == "failure"
+        )
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(saved_slot.current_holder_id, winner_id)
+        self.assertNotEqual(saved_slot.current_holder_id, loser_id)
+        self.assertEqual(saved_slot.original_assignee_id, before[2])
+        self.assertEqual(saved_slot.listed_at, before[3])
+        self.assertEqual(Slot.objects.filter(status=Slot.Status.CLAIMED).count(), 1)
 
 
 class SlotCompletionTests(TestCase):

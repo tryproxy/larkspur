@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models, transaction
+from django.db import OperationalError, connection, models, transaction
 from django.utils import timezone
 
 
@@ -311,6 +311,9 @@ class Slot(models.Model):
     def skip(self, acting_resident, skipped_at):
         return skip_slot(self, acting_resident, skipped_at)
 
+    def claim(self, claiming_resident):
+        return claim_bounty(self, claiming_resident)
+
 
 class CompletionHistoryManager(models.Manager):
     def get_last_done_at(self, resident, chore):
@@ -511,5 +514,83 @@ def skip_slot(slot, acting_resident, skipped_at):
     slot.status = locked_slot.status
     slot.current_holder_id = locked_slot.current_holder_id
     slot.current_holder = None
+    slot.listed_at = locked_slot.listed_at
+    return locked_slot
+
+
+def _is_sqlite_lock_error(error):
+    return connection.vendor == "sqlite" and "locked" in str(error).lower()
+
+
+def _claim_bounty_in_transaction(slot, claiming_resident):
+    try:
+        resident = Resident.objects.get(pk=claiming_resident.pk)
+    except Resident.DoesNotExist as error:
+        raise ValidationError("A persisted claiming resident is required.") from error
+
+    with transaction.atomic():
+        # Make the guarded write the first database operation. SQLite does
+        # not provide row locks for select_for_update(), so a prior shared
+        # read could make concurrent read-to-write upgrades fail together.
+        updated = (
+            Slot.objects.filter(
+                pk=slot.pk,
+                status=Slot.Status.BOUNTY,
+                current_holder__isnull=True,
+                listed_at__isnull=False,
+                period__household_id=resident.household_id,
+                chore__household_id=resident.household_id,
+            )
+            .exclude(original_assignee_id=resident.pk)
+            .update(
+                status=Slot.Status.CLAIMED,
+                current_holder_id=resident.pk,
+            )
+        )
+        if updated != 1:
+            try:
+                Slot.objects.select_for_update().get(pk=slot.pk)
+            except Slot.DoesNotExist as error:
+                raise ValidationError("A persisted slot is required.") from error
+            raise ValidationError("The bounty is no longer available.")
+
+        locked_slot = (
+            Slot.objects.select_for_update()
+            .select_related("period", "chore", "original_assignee")
+            .get(pk=slot.pk)
+        )
+        locked_slot.current_holder = resident
+        return locked_slot, resident
+
+
+def claim_bounty(slot, claiming_resident):
+    if not isinstance(slot, Slot) or slot.pk is None:
+        raise ValidationError("A persisted slot is required.")
+    if not isinstance(claiming_resident, Resident) or claiming_resident.pk is None:
+        raise ValidationError("A persisted claiming resident is required.")
+
+    for attempt in range(3):
+        try:
+            locked_slot, resident = _claim_bounty_in_transaction(
+                slot,
+                claiming_resident,
+            )
+        except OperationalError as error:
+            if not _is_sqlite_lock_error(error):
+                raise
+
+            # SQLite can still surface a database lock while two writers
+            # contend. Roll back and retry so the loser can re-read the
+            # committed state instead of losing both attempts.
+            connection.close()
+            if attempt == 2:
+                raise ValidationError("The bounty is no longer available.") from error
+        else:
+            break
+
+    slot.status = locked_slot.status
+    slot.current_holder_id = locked_slot.current_holder_id
+    slot.current_holder = resident
+    slot.original_assignee_id = locked_slot.original_assignee_id
     slot.listed_at = locked_slot.listed_at
     return locked_slot
