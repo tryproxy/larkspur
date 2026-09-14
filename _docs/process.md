@@ -5,8 +5,11 @@
 Labels
 
 - `mvp` - needed for the current minimum viable product
-- `post-mvp` - real work, deliberately deferred
-- Every issue carries exactly one of the two above labels
+- `showcase` - current work to make the completed MVP presentable and publicly demoable
+- `future` - real product work deliberately deferred beyond the current showcase
+- `draft` - not yet groomed; excluded from issue selection
+- Every issue carries exactly one stage label: `mvp`, `showcase`, or `future`.
+  A draft may also carry `draft`.
 
 Roles
 
@@ -18,13 +21,16 @@ Roles
 
 Lifecycle
 
+Active backlog label: `showcase`.
+
 For issue selection:
 
-- Consider only open `mvp` issues whose listed dependencies are closed.
+- Consider only open issues with the active backlog label, without `draft`, whose
+  listed dependencies are closed.
 - If multiple issues are eligible, choose the lowest issue number.
 - If the selected issue is blocked or conflicts with `_docs/decisions.md`, stop
   and report it.
-- Stop when no eligible open `mvp` issues remain.
+- Stop when no eligible open issues remain.
 
 1. Pick the next eligible issue using the rule above
 2. PM grooms it
