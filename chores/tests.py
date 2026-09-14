@@ -1,11 +1,13 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.utils import timezone
 
-from .models import Chore, Household, Resident
+from .models import Chore, CompletionHistory, Household, Resident
 
 User = get_user_model()
 
@@ -221,3 +223,111 @@ class ChoreCatalogTests(TestCase):
             chore.save()
 
         self.assertFalse(Chore.objects.filter(pk=chore.pk).exists())
+
+
+class CompletionHistoryTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.resident = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="history-resident"),
+            display_name="History Resident",
+            join_date=date(2026, 9, 14),
+        )
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+
+    def test_stored_completion_is_returned_unchanged_and_aware(self):
+        completed_at = datetime(2026, 9, 14, 18, 30, tzinfo=UTC)
+        CompletionHistory.objects.create(
+            resident=self.resident,
+            chore=self.chore,
+            last_done_at=completed_at,
+        )
+
+        stored_at = CompletionHistory.objects.get(
+            resident=self.resident,
+            chore=self.chore,
+        ).last_done_at
+
+        self.assertTrue(timezone.is_aware(stored_at))
+        self.assertEqual(
+            CompletionHistory.objects.get_last_done_at(
+                self.resident,
+                self.chore,
+            ),
+            completed_at,
+        )
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_missing_history_uses_join_date_at_configured_local_midnight(self):
+        with timezone.override("UTC"):
+            fallback = CompletionHistory.objects.get_last_done_at(
+                self.resident,
+                self.chore,
+            )
+
+        expected = datetime(
+            2026,
+            9,
+            14,
+            tzinfo=ZoneInfo("Asia/Tokyo"),
+        )
+        self.assertTrue(timezone.is_aware(fallback))
+        self.assertEqual(fallback, expected)
+
+    def test_last_done_at_must_be_present_and_timezone_aware(self):
+        for last_done_at in (
+            None,
+            datetime.fromisoformat("2026-09-14T18:30:00"),
+        ):
+            with (
+                self.subTest(last_done_at=last_done_at),
+                self.assertRaises(ValidationError),
+            ):
+                CompletionHistory(
+                    resident=self.resident,
+                    chore=self.chore,
+                    last_done_at=last_done_at,
+                ).save()
+
+        self.assertEqual(CompletionHistory.objects.count(), 0)
+
+    def test_duplicate_resident_chore_pair_is_rejected(self):
+        completed_at = datetime(2026, 9, 14, 18, 30, tzinfo=UTC)
+        CompletionHistory.objects.create(
+            resident=self.resident,
+            chore=self.chore,
+            last_done_at=completed_at,
+        )
+
+        with self.assertRaises(ValidationError):
+            CompletionHistory(
+                resident=self.resident,
+                chore=self.chore,
+                last_done_at=completed_at,
+            ).save()
+
+        self.assertEqual(CompletionHistory.objects.count(), 1)
+
+    def test_different_household_resident_and_chore_are_rejected(self):
+        other_household = Household.objects.create(daily_rate=Decimal(0))
+        other_chore = Chore.objects.create(
+            household=other_household,
+            name="Clean windows",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("10.00"),
+        )
+
+        with self.assertRaises(ValidationError):
+            CompletionHistory(
+                resident=self.resident,
+                chore=other_chore,
+                last_done_at=datetime(2026, 9, 14, 18, 30, tzinfo=UTC),
+            ).save()
+
+        self.assertFalse(CompletionHistory.objects.exists())
