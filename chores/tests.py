@@ -946,6 +946,197 @@ class SlotCompletionTests(TestCase):
         self.assertEqual(self.snapshot(slot), before)
 
 
+class ListOverdueCommandTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.assignee = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="overdue-assignee"),
+            display_name="Overdue Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        self.other_resident = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="overdue-other"),
+            display_name="Overdue Other",
+            join_date=date(2026, 9, 2),
+        )
+        self.period_before_deadline = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 21),
+            end_date=date(2026, 9, 28),
+        )
+        self.period_at_deadline = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.period_after_deadline = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 7),
+            end_date=date(2026, 9, 14),
+        )
+        self.chore_number = 0
+
+    def make_slot(self, period, status=Slot.Status.ASSIGNED, listed_at=None):
+        self.chore_number += 1
+        chore = Chore.objects.create(
+            household=self.household,
+            name=f"Overdue chore {self.chore_number}",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+
+        if status == Slot.Status.ASSIGNED:
+            current_holder = self.assignee
+        elif status == Slot.Status.BOUNTY:
+            current_holder = None
+            listed_at = listed_at or datetime(2026, 9, 18, 12, tzinfo=UTC)
+        else:
+            current_holder = self.other_resident
+
+        return Slot.objects.create(
+            period=period,
+            chore=chore,
+            original_assignee=self.assignee,
+            current_holder=current_holder,
+            status=status,
+            deadline=period.end_date,
+            listed_at=listed_at,
+            completed_by=(self.other_resident if status == Slot.Status.DONE else None),
+        )
+
+    def run_list_overdue(self, overdue_date):
+        call_command(
+            "list_overdue",
+            "--at",
+            overdue_date,
+            stdout=StringIO(),
+        )
+
+    def test_lists_slots_on_and_after_deadline_at_configured_local_midnight(self):
+        before_deadline = self.make_slot(self.period_before_deadline)
+        at_deadline = self.make_slot(self.period_at_deadline)
+        after_deadline = self.make_slot(self.period_after_deadline)
+
+        other_household = Household.objects.create(daily_rate=Decimal(0))
+        other_assignee = Resident.objects.create(
+            household=other_household,
+            user=User.objects.create_user(username="overdue-other-household"),
+            display_name="Other Household Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        other_chore = Chore.objects.create(
+            household=other_household,
+            name="Other household chore",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("8.00"),
+        )
+        other_period = Period.objects.create(
+            household=other_household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        other_household_slot = Slot.objects.create(
+            period=other_period,
+            chore=other_chore,
+            original_assignee=other_assignee,
+            current_holder=other_assignee,
+            status=Slot.Status.ASSIGNED,
+            deadline=other_period.end_date,
+        )
+
+        with (
+            override_settings(TIME_ZONE="Asia/Tokyo"),
+            timezone.override("UTC"),
+        ):
+            self.run_list_overdue("2026-09-21")
+
+        expected_listed_at = datetime(
+            2026,
+            9,
+            21,
+            tzinfo=ZoneInfo("Asia/Tokyo"),
+        )
+        for slot in (at_deadline, after_deadline, other_household_slot):
+            with self.subTest(slot=slot.pk):
+                saved_slot = Slot.objects.get(pk=slot.pk)
+                self.assertEqual(saved_slot.status, Slot.Status.BOUNTY)
+                self.assertIsNone(saved_slot.current_holder)
+                self.assertEqual(
+                    saved_slot.original_assignee_id,
+                    slot.original_assignee_id,
+                )
+                self.assertTrue(timezone.is_aware(saved_slot.listed_at))
+                self.assertEqual(saved_slot.listed_at, expected_listed_at)
+
+        saved_before_deadline = Slot.objects.get(pk=before_deadline.pk)
+        self.assertEqual(saved_before_deadline.status, Slot.Status.ASSIGNED)
+        self.assertEqual(
+            saved_before_deadline.current_holder_id,
+            self.assignee.pk,
+        )
+        self.assertIsNone(saved_before_deadline.listed_at)
+
+    def test_existing_bounty_claimed_and_done_slots_are_unchanged_and_reruns_are_idempotent(
+        self,
+    ):
+        assigned_slot = self.make_slot(self.period_at_deadline)
+        bounty_listed_at = datetime(2026, 9, 18, 12, tzinfo=UTC)
+        bounty_slot = self.make_slot(
+            self.period_at_deadline,
+            status=Slot.Status.BOUNTY,
+            listed_at=bounty_listed_at,
+        )
+        claimed_listed_at = datetime(2026, 9, 17, 12, tzinfo=UTC)
+        claimed_slot = self.make_slot(
+            self.period_at_deadline,
+            status=Slot.Status.CLAIMED,
+            listed_at=claimed_listed_at,
+        )
+        done_slot = self.make_slot(
+            self.period_at_deadline,
+            status=Slot.Status.DONE,
+        )
+
+        def snapshot(slot):
+            saved_slot = Slot.objects.get(pk=slot.pk)
+            return (
+                saved_slot.status,
+                saved_slot.current_holder_id,
+                saved_slot.original_assignee_id,
+                saved_slot.completed_by_id,
+                saved_slot.listed_at,
+            )
+
+        protected_before = {
+            slot.pk: snapshot(slot) for slot in (bounty_slot, claimed_slot, done_slot)
+        }
+        slot_count_before = Slot.objects.count()
+
+        self.run_list_overdue("2026-09-21")
+        assigned_after_first_run = snapshot(assigned_slot)
+        protected_after_first_run = {
+            slot.pk: snapshot(slot) for slot in (bounty_slot, claimed_slot, done_slot)
+        }
+
+        self.run_list_overdue("2026-09-21")
+
+        self.assertEqual(Slot.objects.count(), slot_count_before)
+        self.assertEqual(assigned_after_first_run, snapshot(assigned_slot))
+        self.assertEqual(protected_before, protected_after_first_run)
+        self.assertEqual(
+            protected_after_first_run,
+            {
+                slot.pk: snapshot(slot)
+                for slot in (bounty_slot, claimed_slot, done_slot)
+            },
+        )
+        self.assertEqual(assigned_after_first_run[0], Slot.Status.BOUNTY)
+        self.assertIsNone(assigned_after_first_run[1])
+        self.assertEqual(assigned_after_first_run[2], self.assignee.pk)
+
+
 class OpenWeekCommandTests(TestCase):
     def setUp(self):
         self.household = Household.objects.create(daily_rate=Decimal(0))
