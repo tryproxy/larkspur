@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -727,6 +728,18 @@ class SlotCompletionTests(TestCase):
             original_completion,
         )
         self.assertEqual(CompletionHistory.objects.count(), 2)
+
+    def test_successful_completion_leaves_no_iou_or_ledger_table(self):
+        slot = self.make_slot(status=Slot.Status.CLAIMED)
+
+        complete_slot(slot, self.claimed_holder, self.completed_at)
+
+        ledger_tables = {
+            table_name
+            for table_name in connection.introspection.table_names()
+            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
+        }
+        self.assertEqual(ledger_tables, set())
 
     @override_settings(TIME_ZONE="Asia/Tokyo")
     def test_naive_completion_timestamp_uses_configured_timezone(self):
