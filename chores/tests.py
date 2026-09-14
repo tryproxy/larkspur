@@ -1,9 +1,11 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from io import StringIO
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -570,3 +572,155 @@ class PeriodAndSlotTests(TestCase):
             ).save()
 
         self.assertFalse(Slot.objects.exists())
+
+
+class OpenWeekCommandTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.residents = [
+            Resident.objects.create(
+                household=self.household,
+                user=User.objects.create_user(username=f"open-week-{index}"),
+                display_name=f"Open Week Resident {index}",
+                join_date=join_date,
+            )
+            for index, join_date in enumerate(
+                (
+                    date(2026, 1, 1),
+                    date(2026, 1, 10),
+                    date(2026, 1, 20),
+                ),
+                start=1,
+            )
+        ]
+        self.weekly_chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        self.biweekly_chore = Chore.objects.create(
+            household=self.household,
+            name="Clean windows",
+            cadence=Chore.Cadence.BIWEEKLY,
+            cadence_anchor=date(2026, 9, 14),
+            start_amount=Decimal("25.00"),
+        )
+
+        CompletionHistory.objects.create(
+            resident=self.residents[0],
+            chore=self.weekly_chore,
+            last_done_at=datetime(2026, 9, 10, 12, tzinfo=UTC),
+        )
+        CompletionHistory.objects.create(
+            resident=self.residents[2],
+            chore=self.weekly_chore,
+            last_done_at=datetime(2026, 9, 12, 12, tzinfo=UTC),
+        )
+
+        tie_timestamp = datetime(2026, 9, 10, 12, tzinfo=UTC)
+        for resident in self.residents[:2]:
+            CompletionHistory.objects.create(
+                resident=resident,
+                chore=self.biweekly_chore,
+                last_done_at=tie_timestamp,
+            )
+        CompletionHistory.objects.create(
+            resident=self.residents[2],
+            chore=self.biweekly_chore,
+            last_done_at=datetime(2026, 9, 12, 12, tzinfo=UTC),
+        )
+
+    def run_open_week(self, requested_date):
+        call_command(
+            "open_week",
+            "--date",
+            requested_date,
+            stdout=StringIO(),
+        )
+
+    def test_open_week_resolves_due_periods_and_assigns_deterministically(self):
+        self.run_open_week("2026-09-15")
+
+        anchor_period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+        )
+        self.assertEqual(anchor_period.end_date, date(2026, 9, 21))
+        self.assertEqual(anchor_period.end_date.weekday(), 0)
+        anchor_slots = {slot.chore_id: slot for slot in anchor_period.slots.all()}
+        self.assertEqual(len(anchor_slots), 2)
+        self.assertEqual(
+            anchor_slots[self.weekly_chore.pk].original_assignee_id,
+            self.residents[1].pk,
+        )
+        self.assertEqual(
+            anchor_slots[self.biweekly_chore.pk].original_assignee_id,
+            self.residents[0].pk,
+        )
+        for slot in anchor_slots.values():
+            with self.subTest(chore_id=slot.chore_id):
+                self.assertEqual(slot.current_holder_id, slot.original_assignee_id)
+                self.assertEqual(slot.status, Slot.Status.ASSIGNED)
+                self.assertEqual(slot.deadline, anchor_period.end_date)
+                self.assertIsNone(slot.listed_at)
+
+        self.run_open_week("2026-09-08")
+        before_anchor_period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 7),
+        )
+        self.assertEqual(before_anchor_period.slots.count(), 1)
+        self.assertTrue(
+            before_anchor_period.slots.filter(chore=self.weekly_chore).exists()
+        )
+
+        self.run_open_week("2026-09-22")
+        off_week_period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 21),
+        )
+        self.assertEqual(off_week_period.slots.count(), 1)
+        self.assertTrue(off_week_period.slots.filter(chore=self.weekly_chore).exists())
+
+        self.run_open_week("2026-09-29")
+        even_week_period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 28),
+        )
+        self.assertEqual(even_week_period.slots.count(), 2)
+        self.assertTrue(
+            even_week_period.slots.filter(chore=self.biweekly_chore).exists()
+        )
+
+    def test_reopening_a_period_is_idempotent_and_preserves_assignments(self):
+        self.run_open_week("2026-09-15")
+        period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+        )
+
+        for slot in period.slots.all():
+            slot.original_assignee = self.residents[2]
+            slot.current_holder = self.residents[2]
+            slot.save()
+        assignments_before = {
+            slot.chore_id: (
+                slot.original_assignee_id,
+                slot.current_holder_id,
+            )
+            for slot in period.slots.all()
+        }
+
+        self.run_open_week("2026-09-15")
+
+        self.assertEqual(Period.objects.filter(household=self.household).count(), 1)
+        self.assertEqual(Slot.objects.filter(period=period).count(), 2)
+        assignments_after = {
+            slot.chore_id: (
+                slot.original_assignee_id,
+                slot.current_holder_id,
+            )
+            for slot in period.slots.all()
+        }
+        self.assertEqual(assignments_after, assignments_before)
