@@ -18,6 +18,10 @@ class Household(models.Model):
         validators=[MinValueValidator(Decimal(0))],
     )
 
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
 
 class Resident(models.Model):
     household = models.ForeignKey(
@@ -35,3 +39,7 @@ class Resident(models.Model):
         validators=[validate_display_name],
     )
     join_date = models.DateField()
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

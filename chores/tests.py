@@ -81,6 +81,14 @@ class HouseholdAndResidentTests(TestCase):
         with self.assertRaises(ValidationError):
             Household(daily_rate=Decimal("-0.01")).full_clean()
 
+    def test_negative_daily_rate_cannot_be_saved(self):
+        household = Household(daily_rate=Decimal("-0.01"))
+
+        with self.assertRaises(ValidationError):
+            household.save()
+
+        self.assertFalse(Household.objects.filter(pk=household.pk).exists())
+
     def test_display_name_cannot_be_blank_or_whitespace_only(self):
         household = Household.objects.create(daily_rate=Decimal(0))
 
@@ -95,3 +103,17 @@ class HouseholdAndResidentTests(TestCase):
                     display_name=display_name,
                     join_date=date(2026, 1, 1),
                 ).full_clean()
+
+    def test_whitespace_only_display_name_cannot_be_saved(self):
+        household = Household.objects.create(daily_rate=Decimal(0))
+        resident = Resident(
+            household=household,
+            user=User.objects.create_user(username="whitespace-resident"),
+            display_name="   ",
+            join_date=date(2026, 1, 1),
+        )
+
+        with self.assertRaises(ValidationError):
+            resident.save()
+
+        self.assertFalse(Resident.objects.filter(pk=resident.pk).exists())
