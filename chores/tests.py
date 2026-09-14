@@ -19,6 +19,7 @@ from .models import (
     Resident,
     Slot,
     complete_slot,
+    skip_slot,
 )
 
 User = get_user_model()
@@ -582,6 +583,150 @@ class PeriodAndSlotTests(TestCase):
             ).save()
 
         self.assertFalse(Slot.objects.exists())
+
+
+class SlotSkipTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.05"))
+        self.assignee = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="skip-assignee"),
+            display_name="Skip Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        self.other_resident = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="skip-other"),
+            display_name="Skip Other",
+            join_date=date(2026, 9, 2),
+        )
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+
+    def make_slot(self):
+        return Slot.objects.create(
+            period=self.period,
+            chore=self.chore,
+            original_assignee=self.assignee,
+            current_holder=self.assignee,
+            status=Slot.Status.ASSIGNED,
+            deadline=self.period.end_date,
+        )
+
+    def snapshot(self, slot):
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        return (
+            saved_slot.status,
+            saved_slot.current_holder_id,
+            saved_slot.original_assignee_id,
+            saved_slot.listed_at,
+        )
+
+    def test_valid_skip_lists_slot_at_day_zero_start_amount(self):
+        slot = self.make_slot()
+        skipped_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+
+        skipped_slot = slot.skip(self.assignee, skipped_at)
+
+        saved_slot = Slot.objects.select_related("chore").get(pk=slot.pk)
+        self.assertEqual(skipped_slot.status, Slot.Status.BOUNTY)
+        self.assertEqual(saved_slot.status, Slot.Status.BOUNTY)
+        self.assertIsNone(saved_slot.current_holder)
+        self.assertEqual(saved_slot.original_assignee_id, self.assignee.pk)
+        self.assertEqual(saved_slot.listed_at, skipped_at)
+        self.assertTrue(timezone.is_aware(saved_slot.listed_at))
+        self.assertEqual(saved_slot.chore.start_amount, Decimal("12.50"))
+
+    def test_invalid_actor_is_rejected_without_mutation(self):
+        slot = self.make_slot()
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            skip_slot(
+                slot,
+                self.other_resident,
+                datetime(2026, 9, 16, 18, 30, tzinfo=UTC),
+            )
+
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_deadline_boundary_and_after_deadline_are_rejected_without_mutation(
+        self,
+    ):
+        slot = self.make_slot()
+        before = self.snapshot(slot)
+
+        for skipped_at in (
+            datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+            datetime(2026, 9, 22, 0, 0, tzinfo=UTC),
+        ):
+            with (
+                self.subTest(skipped_at=skipped_at),
+                self.assertRaises(ValidationError),
+            ):
+                skip_slot(slot, self.assignee, skipped_at)
+
+            self.assertEqual(self.snapshot(slot), before)
+
+    def test_repeated_skip_is_rejected_without_mutation(self):
+        slot = self.make_slot()
+        first_skipped_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+        skip_slot(slot, self.assignee, first_skipped_at)
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            skip_slot(
+                slot,
+                self.assignee,
+                datetime(2026, 9, 17, 18, 30, tzinfo=UTC),
+            )
+
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_skip_creates_no_iou_or_ledger_table(self):
+        slot = self.make_slot()
+
+        skip_slot(
+            slot,
+            self.assignee,
+            datetime(2026, 9, 16, 18, 30, tzinfo=UTC),
+        )
+
+        ledger_tables = {
+            table_name
+            for table_name in connection.introspection.table_names()
+            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
+        }
+        self.assertEqual(ledger_tables, set())
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_naive_skip_timestamp_uses_configured_timezone(self):
+        slot = self.make_slot()
+        naive_skipped_at = datetime.fromisoformat("2026-09-16T18:30:00")
+
+        with timezone.override("UTC"):
+            skip_slot(slot, self.assignee, naive_skipped_at)
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        expected = datetime(
+            2026,
+            9,
+            16,
+            18,
+            30,
+            tzinfo=ZoneInfo("Asia/Tokyo"),
+        )
+        self.assertTrue(timezone.is_aware(saved_slot.listed_at))
+        self.assertEqual(saved_slot.listed_at, expected)
 
 
 class SlotCompletionTests(TestCase):

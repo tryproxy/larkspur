@@ -308,6 +308,9 @@ class Slot(models.Model):
     def complete(self, acting_resident, completed_at):
         return complete_slot(self, acting_resident, completed_at)
 
+    def skip(self, acting_resident, skipped_at):
+        return skip_slot(self, acting_resident, skipped_at)
+
 
 class CompletionHistoryManager(models.Manager):
     def get_last_done_at(self, resident, chore):
@@ -412,4 +415,67 @@ def complete_slot(slot, acting_resident, completed_at):
     slot.status = locked_slot.status
     slot.current_holder_id = locked_slot.current_holder_id
     slot.completed_by = resident
+    return locked_slot
+
+
+def _normalize_skip_timestamp(skipped_at):
+    if not isinstance(skipped_at, datetime):
+        raise ValidationError("Skip timestamp must be a datetime.")
+
+    if timezone.is_naive(skipped_at):
+        return timezone.make_aware(
+            skipped_at,
+            timezone.get_default_timezone(),
+        )
+
+    return skipped_at
+
+
+def skip_slot(slot, acting_resident, skipped_at):
+    if not isinstance(slot, Slot) or slot.pk is None:
+        raise ValidationError("A persisted slot is required.")
+    if not isinstance(acting_resident, Resident) or acting_resident.pk is None:
+        raise ValidationError("A persisted acting resident is required.")
+
+    skipped_at = _normalize_skip_timestamp(skipped_at)
+    application_timezone = timezone.get_default_timezone()
+
+    with transaction.atomic():
+        locked_slot = (
+            Slot.objects.select_for_update()
+            .select_related("period", "chore", "original_assignee")
+            .get(pk=slot.pk)
+        )
+
+        if locked_slot.status != Slot.Status.ASSIGNED:
+            raise ValidationError("Only assigned slots can be skipped.")
+        if locked_slot.original_assignee_id != acting_resident.pk:
+            raise ValidationError("Only the slot assignee can skip it.")
+
+        try:
+            resident = Resident.objects.get(pk=acting_resident.pk)
+        except Resident.DoesNotExist as error:
+            raise ValidationError("A persisted acting resident is required.") from error
+
+        if resident.household_id != locked_slot.period.household_id:
+            raise ValidationError(
+                "The acting resident must belong to the slot household."
+            )
+
+        skipped_local_date = timezone.localtime(
+            skipped_at,
+            application_timezone,
+        ).date()
+        if skipped_local_date >= locked_slot.deadline:
+            raise ValidationError("A slot can only be skipped before its deadline.")
+
+        locked_slot.status = Slot.Status.BOUNTY
+        locked_slot.current_holder = None
+        locked_slot.listed_at = skipped_at
+        locked_slot.save(update_fields=("status", "current_holder", "listed_at"))
+
+    slot.status = locked_slot.status
+    slot.current_holder_id = locked_slot.current_holder_id
+    slot.current_holder = None
+    slot.listed_at = locked_slot.listed_at
     return locked_slot
