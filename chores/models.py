@@ -4,7 +4,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 
@@ -167,6 +167,13 @@ class Slot(models.Model):
         null=True,
         blank=True,
     )
+    completed_by = models.ForeignKey(
+        Resident,
+        on_delete=models.CASCADE,
+        related_name="completed_slots",
+        null=True,
+        blank=True,
+    )
     status = models.CharField(max_length=8, choices=Status.choices)
     deadline = models.DateField()
     listed_at = models.DateTimeField(null=True, blank=True)
@@ -240,9 +247,15 @@ class Slot(models.Model):
         else:
             holder_household_id = None
 
+        if self.completed_by_id:
+            completer_household_id = self.completed_by.household_id
+            household_ids.add(completer_household_id)
+        else:
+            completer_household_id = None
+
         if len(household_ids) > 1:
             raise ValidationError(
-                "Period, chore, assignees, and holder must share a household."
+                "Period, chore, assignees, holder, and completer must share a household."
             )
 
         if (
@@ -292,6 +305,9 @@ class Slot(models.Model):
         self.full_clean()
         return super().save(*args, **kwargs)
 
+    def complete(self, acting_resident, completed_at):
+        return complete_slot(self, acting_resident, completed_at)
+
 
 class CompletionHistoryManager(models.Manager):
     def get_last_done_at(self, resident, chore):
@@ -337,3 +353,63 @@ class CompletionHistory(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+def _normalize_completion_timestamp(completed_at):
+    if not isinstance(completed_at, datetime):
+        raise ValidationError("Completion timestamp must be a datetime.")
+
+    if timezone.is_naive(completed_at):
+        return timezone.make_aware(
+            completed_at,
+            timezone.get_default_timezone(),
+        )
+
+    return completed_at
+
+
+def complete_slot(slot, acting_resident, completed_at):
+    if not isinstance(slot, Slot) or slot.pk is None:
+        raise ValidationError("A persisted slot is required.")
+    if not isinstance(acting_resident, Resident) or acting_resident.pk is None:
+        raise ValidationError("A persisted acting resident is required.")
+
+    completed_at = _normalize_completion_timestamp(completed_at)
+
+    with transaction.atomic():
+        locked_slot = (
+            Slot.objects.select_for_update()
+            .select_related("period", "chore", "original_assignee")
+            .get(pk=slot.pk)
+        )
+
+        if locked_slot.status not in (
+            Slot.Status.ASSIGNED,
+            Slot.Status.CLAIMED,
+        ):
+            raise ValidationError("Only assigned or claimed slots can be completed.")
+        if locked_slot.current_holder_id is None:
+            raise ValidationError("Only slots with a current holder can be completed.")
+        if locked_slot.current_holder_id != acting_resident.pk:
+            raise ValidationError("Only the current holder can complete the slot.")
+
+        resident = Resident.objects.get(pk=acting_resident.pk)
+        if resident.household_id != locked_slot.period.household_id:
+            raise ValidationError(
+                "The acting resident must belong to the slot household."
+            )
+
+        locked_slot.status = Slot.Status.DONE
+        locked_slot.completed_by = resident
+        locked_slot.save(update_fields=("status", "completed_by"))
+
+        CompletionHistory.objects.update_or_create(
+            resident_id=resident.pk,
+            chore_id=locked_slot.chore_id,
+            defaults={"last_done_at": completed_at},
+        )
+
+    slot.status = locked_slot.status
+    slot.current_holder_id = locked_slot.current_holder_id
+    slot.completed_by = resident
+    return locked_slot

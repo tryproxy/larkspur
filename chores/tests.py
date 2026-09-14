@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
@@ -9,7 +10,15 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from .models import Chore, CompletionHistory, Household, Period, Resident, Slot
+from .models import (
+    Chore,
+    CompletionHistory,
+    Household,
+    Period,
+    Resident,
+    Slot,
+    complete_slot,
+)
 
 User = get_user_model()
 
@@ -572,6 +581,211 @@ class PeriodAndSlotTests(TestCase):
             ).save()
 
         self.assertFalse(Slot.objects.exists())
+
+
+class SlotCompletionTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.assignee = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="completion-assignee"),
+            display_name="Completion Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        self.claimed_holder = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="completion-holder"),
+            display_name="Completion Holder",
+            join_date=date(2026, 9, 2),
+        )
+        self.other_resident = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="completion-other"),
+            display_name="Completion Other",
+            join_date=date(2026, 9, 3),
+        )
+        other_household = Household.objects.create(daily_rate=Decimal(0))
+        self.foreign_resident = Resident.objects.create(
+            household=other_household,
+            user=User.objects.create_user(username="completion-foreign"),
+            display_name="Completion Foreign",
+            join_date=date(2026, 9, 4),
+        )
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.completed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+
+    def make_slot(self, status=Slot.Status.ASSIGNED):
+        if status == Slot.Status.ASSIGNED:
+            holder = self.assignee
+            listed_at = None
+        elif status == Slot.Status.BOUNTY:
+            holder = None
+            listed_at = datetime(2026, 9, 16, 12, tzinfo=UTC)
+        elif status == Slot.Status.CLAIMED:
+            holder = self.claimed_holder
+            listed_at = datetime(2026, 9, 16, 12, tzinfo=UTC)
+        else:
+            holder = self.assignee
+            listed_at = None
+
+        return Slot.objects.create(
+            period=self.period,
+            chore=self.chore,
+            original_assignee=self.assignee,
+            current_holder=holder,
+            status=status,
+            deadline=self.period.end_date,
+            listed_at=listed_at,
+        )
+
+    def snapshot(self, slot):
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        histories = list(
+            CompletionHistory.objects.order_by("pk").values_list(
+                "pk",
+                "resident_id",
+                "chore_id",
+                "last_done_at",
+            )
+        )
+        return (
+            saved_slot.status,
+            saved_slot.current_holder_id,
+            saved_slot.completed_by_id,
+            saved_slot.listed_at,
+            histories,
+        )
+
+    def assert_rejected_without_mutation(self, slot, resident):
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            complete_slot(slot, resident, self.completed_at)
+
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_assigned_holder_completion_creates_history_and_records_completer(self):
+        slot = self.make_slot()
+
+        completed_slot = complete_slot(slot, self.assignee, self.completed_at)
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        history = CompletionHistory.objects.get(
+            resident=self.assignee,
+            chore=self.chore,
+        )
+        self.assertEqual(completed_slot.status, Slot.Status.DONE)
+        self.assertEqual(saved_slot.status, Slot.Status.DONE)
+        self.assertEqual(saved_slot.current_holder_id, self.assignee.pk)
+        self.assertEqual(saved_slot.completed_by_id, self.assignee.pk)
+        self.assertTrue(timezone.is_aware(history.last_done_at))
+        self.assertEqual(history.last_done_at, self.completed_at)
+        self.assertEqual(CompletionHistory.objects.count(), 1)
+
+    def test_claimed_holder_completion_updates_only_that_holders_history(self):
+        original_completion = datetime(2026, 9, 10, 12, tzinfo=UTC)
+        CompletionHistory.objects.create(
+            resident=self.assignee,
+            chore=self.chore,
+            last_done_at=original_completion,
+        )
+        CompletionHistory.objects.create(
+            resident=self.claimed_holder,
+            chore=self.chore,
+            last_done_at=original_completion,
+        )
+        slot = self.make_slot(status=Slot.Status.CLAIMED)
+
+        complete_slot(slot, self.claimed_holder, self.completed_at)
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.DONE)
+        self.assertEqual(saved_slot.current_holder_id, self.claimed_holder.pk)
+        self.assertEqual(saved_slot.completed_by_id, self.claimed_holder.pk)
+        self.assertEqual(
+            CompletionHistory.objects.get(
+                resident=self.claimed_holder,
+                chore=self.chore,
+            ).last_done_at,
+            self.completed_at,
+        )
+        self.assertEqual(
+            CompletionHistory.objects.get(
+                resident=self.assignee,
+                chore=self.chore,
+            ).last_done_at,
+            original_completion,
+        )
+        self.assertEqual(CompletionHistory.objects.count(), 2)
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_naive_completion_timestamp_uses_configured_timezone(self):
+        slot = self.make_slot()
+        naive_completion = datetime.fromisoformat("2026-09-16T18:30:00")
+
+        with timezone.override("UTC"):
+            complete_slot(slot, self.assignee, naive_completion)
+
+        history = CompletionHistory.objects.get(
+            resident=self.assignee,
+            chore=self.chore,
+        )
+        expected = datetime(
+            2026,
+            9,
+            16,
+            18,
+            30,
+            tzinfo=ZoneInfo("Asia/Tokyo"),
+        )
+        self.assertTrue(timezone.is_aware(history.last_done_at))
+        self.assertEqual(history.last_done_at, expected)
+
+    def test_bounty_slot_without_holder_is_rejected_without_mutation(self):
+        slot = self.make_slot(status=Slot.Status.BOUNTY)
+
+        self.assert_rejected_without_mutation(slot, self.assignee)
+
+    def test_done_slot_is_rejected_without_mutation(self):
+        slot = self.make_slot(status=Slot.Status.DONE)
+
+        self.assert_rejected_without_mutation(slot, self.assignee)
+
+    def test_non_holder_is_rejected_without_mutation(self):
+        slot = self.make_slot()
+
+        self.assert_rejected_without_mutation(slot, self.other_resident)
+
+    def test_resident_from_another_household_is_rejected_without_mutation(self):
+        slot = self.make_slot()
+
+        self.assert_rejected_without_mutation(slot, self.foreign_resident)
+
+    def test_history_failure_rolls_back_the_slot_completion(self):
+        slot = self.make_slot()
+        before = self.snapshot(slot)
+
+        with (
+            patch.object(
+                CompletionHistory.objects,
+                "update_or_create",
+                side_effect=RuntimeError("history write failed"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            complete_slot(slot, self.assignee, self.completed_at)
+
+        self.assertEqual(self.snapshot(slot), before)
 
 
 class OpenWeekCommandTests(TestCase):
