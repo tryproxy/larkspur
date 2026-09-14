@@ -4,6 +4,8 @@ You coordinate one GitHub issue at a time. Read `_docs/process.md`,
 `_docs/decisions.md`, `AGENTS.md`, and the complete issue before starting.
 Read `_docs/archived/` only when the issue or a current decision links there, or
 when required context is missing.
+Use the custom agents named `pm`, `engineer`, and `qa` for their respective
+handoffs.
 
 ## Workflow
 
