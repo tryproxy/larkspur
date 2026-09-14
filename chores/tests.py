@@ -18,6 +18,7 @@ from .models import (
     Period,
     Resident,
     Slot,
+    calculate_bounty_payout,
     complete_slot,
     skip_slot,
 )
@@ -583,6 +584,123 @@ class PeriodAndSlotTests(TestCase):
             ).save()
 
         self.assertFalse(Slot.objects.exists())
+
+
+class BountyPayoutTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.10"))
+        self.assignee = Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username="payout-assignee"),
+            display_name="Payout Assignee",
+            join_date=date(2026, 9, 1),
+        )
+        self.chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+
+    def make_slot(self, listed_at=None):
+        if listed_at is None:
+            status = Slot.Status.ASSIGNED
+            current_holder = self.assignee
+        else:
+            status = Slot.Status.BOUNTY
+            current_holder = None
+
+        return Slot.objects.create(
+            period=self.period,
+            chore=self.chore,
+            original_assignee=self.assignee,
+            current_holder=current_holder,
+            status=status,
+            deadline=self.period.end_date,
+            listed_at=listed_at,
+        )
+
+    def test_unlisted_slot_has_no_payout(self):
+        slot = self.make_slot()
+
+        self.assertIsNone(
+            calculate_bounty_payout(
+                slot,
+                datetime(2026, 9, 14, 12, tzinfo=UTC),
+            )
+        )
+
+    def test_listing_date_is_day_zero_and_returns_decimal_start_amount(self):
+        listed_at = datetime(2026, 9, 14, 12, tzinfo=UTC)
+        slot = self.make_slot(listed_at=listed_at)
+
+        payout = calculate_bounty_payout(
+            slot,
+            datetime(2026, 9, 14, 23, 59, tzinfo=UTC),
+        )
+
+        self.assertIsInstance(payout, Decimal)
+        self.assertEqual(payout, Decimal("12.50"))
+
+    def test_later_date_uses_decimal_simple_interest(self):
+        slot = self.make_slot(
+            listed_at=datetime(2026, 9, 14, 12, tzinfo=UTC),
+        )
+
+        payout = calculate_bounty_payout(
+            slot,
+            datetime(2026, 9, 17, 12, tzinfo=UTC),
+        )
+
+        self.assertEqual(payout, Decimal("16.25"))
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_aware_current_at_uses_configured_local_date_at_midnight_boundary(self):
+        slot = self.make_slot(
+            listed_at=datetime(2026, 9, 14, 14, 59, tzinfo=UTC),
+        )
+
+        with timezone.override("UTC"):
+            payout = calculate_bounty_payout(
+                slot,
+                datetime(2026, 9, 14, 15, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual(payout, Decimal("13.75"))
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_naive_current_at_uses_configured_timezone(self):
+        slot = self.make_slot(
+            listed_at=datetime(2026, 9, 14, 14, 30, tzinfo=UTC),
+        )
+
+        with timezone.override("UTC"):
+            payout = calculate_bounty_payout(
+                slot,
+                datetime.fromisoformat("2026-09-14T23:00:00"),
+            )
+
+        self.assertEqual(payout, Decimal("12.50"))
+
+    def test_current_time_before_listing_never_produces_negative_days(self):
+        slot = self.make_slot(
+            listed_at=datetime(2026, 9, 15, 12, tzinfo=UTC),
+        )
+
+        for current_at in (
+            datetime(2026, 9, 14, 12, tzinfo=UTC),
+            datetime(2026, 9, 15, 11, tzinfo=UTC),
+        ):
+            with self.subTest(current_at=current_at):
+                self.assertEqual(
+                    calculate_bounty_payout(slot, current_at),
+                    Decimal("12.50"),
+                )
 
 
 class SlotSkipTests(TestCase):

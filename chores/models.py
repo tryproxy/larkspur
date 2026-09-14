@@ -371,6 +371,40 @@ def _normalize_completion_timestamp(completed_at):
     return completed_at
 
 
+def _normalize_payout_timestamp(current_at):
+    if not isinstance(current_at, datetime):
+        raise ValidationError("Payout timestamp must be a datetime.")
+
+    if timezone.is_naive(current_at):
+        return timezone.make_aware(
+            current_at,
+            timezone.get_default_timezone(),
+        )
+
+    return current_at
+
+
+def calculate_bounty_payout(slot, current_at):
+    if not isinstance(slot, Slot) or slot.pk is None:
+        raise ValidationError("A persisted slot is required.")
+    if slot.listed_at is None:
+        return None
+
+    application_timezone = timezone.get_default_timezone()
+    current_at = _normalize_payout_timestamp(current_at)
+    listed_at = slot.listed_at
+    if timezone.is_naive(listed_at):
+        listed_at = timezone.make_aware(listed_at, application_timezone)
+
+    listed_local = timezone.localtime(listed_at, application_timezone)
+    current_local = timezone.localtime(current_at, application_timezone)
+    days_on_board = max((current_local.date() - listed_local.date()).days, 0)
+
+    return slot.chore.start_amount * (
+        Decimal(1) + slot.chore.household.daily_rate * Decimal(days_on_board)
+    )
+
+
 def complete_slot(slot, acting_resident, completed_at):
     if not isinstance(slot, Slot) or slot.pk is None:
         raise ValidationError("A persisted slot is required.")
