@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
-from .models import Household, Resident
+from .models import Chore, Household, Resident
 
 User = get_user_model()
 
@@ -117,3 +117,107 @@ class HouseholdAndResidentTests(TestCase):
             resident.save()
 
         self.assertFalse(Resident.objects.filter(pk=resident.pk).exists())
+
+
+class ChoreCatalogTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+
+    def test_weekly_chore_persists_with_household_and_exact_start_amount(self):
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+
+        saved_chore = Chore.objects.get(pk=chore.pk)
+        self.assertEqual(saved_chore.household_id, self.household.pk)
+        self.assertEqual(saved_chore.name, "Clean kitchen")
+        self.assertEqual(saved_chore.cadence, Chore.Cadence.WEEKLY)
+        self.assertIsNone(saved_chore.cadence_anchor)
+        self.assertEqual(saved_chore.start_amount, Decimal("12.50"))
+
+    def test_biweekly_chore_persists_its_monday_anchor(self):
+        anchor = date(2026, 9, 14)
+
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Clean windows",
+            cadence=Chore.Cadence.BIWEEKLY,
+            cadence_anchor=anchor,
+            start_amount=Decimal("25.00"),
+        )
+
+        saved_chore = Chore.objects.get(pk=chore.pk)
+        self.assertEqual(saved_chore.cadence, Chore.Cadence.BIWEEKLY)
+        self.assertEqual(saved_chore.cadence_anchor, anchor)
+        self.assertEqual(saved_chore.cadence_anchor.weekday(), 0)
+        self.assertEqual(saved_chore.start_amount, Decimal("25.00"))
+
+    def test_weekly_chore_does_not_require_a_cadence_anchor(self):
+        Chore.objects.create(
+            household=self.household,
+            name="Water plants",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("0.00"),
+        )
+
+        self.assertEqual(Chore.objects.count(), 1)
+
+    def test_biweekly_chore_requires_a_monday_cadence_anchor(self):
+        for cadence_anchor in (None, date(2026, 9, 15)):
+            with (
+                self.subTest(cadence_anchor=cadence_anchor),
+                self.assertRaises(ValidationError),
+            ):
+                Chore(
+                    household=self.household,
+                    name="Change sheets",
+                    cadence=Chore.Cadence.BIWEEKLY,
+                    cadence_anchor=cadence_anchor,
+                    start_amount=Decimal("10.00"),
+                ).save()
+
+        self.assertEqual(Chore.objects.count(), 0)
+
+    def test_invalid_cadence_cannot_be_saved(self):
+        chore = Chore(
+            household=self.household,
+            name="Do dishes",
+            cadence="monthly",
+            start_amount=Decimal("5.00"),
+        )
+
+        with self.assertRaises(ValidationError):
+            chore.save()
+
+        self.assertFalse(Chore.objects.filter(pk=chore.pk).exists())
+
+    def test_blank_or_whitespace_name_cannot_be_saved(self):
+        for index, name in enumerate(("", "   "), start=1):
+            with (
+                self.subTest(name=repr(name)),
+                self.assertRaises(ValidationError),
+            ):
+                Chore(
+                    household=self.household,
+                    name=name,
+                    cadence=Chore.Cadence.WEEKLY,
+                    start_amount=Decimal("5.00"),
+                ).save()
+
+        self.assertEqual(Chore.objects.count(), 0)
+
+    def test_negative_start_amount_cannot_be_saved(self):
+        chore = Chore(
+            household=self.household,
+            name="Take out trash",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("-0.01"),
+        )
+
+        with self.assertRaises(ValidationError):
+            chore.save()
+
+        self.assertFalse(Chore.objects.filter(pk=chore.pk).exists())
