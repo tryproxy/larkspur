@@ -14,7 +14,7 @@ Roles
   `pm`, `engineer`, and `qa` agents, and does not perform their work
 - PM - grooms a task before anyone implements it, follows _docs/team/pm.md
 - Engineer - implements one groomed task, follows _docs/team/engineer.md
-- QA - checks the result, reports PASS or FAIL, and comments on FAIL; follows _docs/team/qa.md
+- QA - verifies the issue; follows _docs/team/qa.md
 
 Lifecycle
 
@@ -31,12 +31,13 @@ For issue selection:
 3. Engineer implements it
 4. QA verifies it
 5. On FAIL, back to step 3 with the QA comment as input
-6. On PASS, close the issue
+6. On PASS, QA marks every acceptance criterion as checked in the issue body,
+   then closes the issue
 7. Repeat until no eligible open `mvp` issues remain
 
 Rules
 
 - Do not skip step 2
 - The engineer does not close the issue
-- QA does not fix the code, only outputs PASS or FAIL
-- The orchestrator closes the issue only after QA outputs PASS
+- QA does not fix the code. On PASS, QA updates only the acceptance-criteria
+  checkboxes and closes the issue
