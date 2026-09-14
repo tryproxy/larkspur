@@ -14,6 +14,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import (
+    IOU,
     Chore,
     CompletionHistory,
     Household,
@@ -22,6 +23,7 @@ from .models import (
     Slot,
     calculate_bounty_payout,
     claim_bounty,
+    claim_bounty_with_iou,
     complete_slot,
     skip_slot,
 )
@@ -813,7 +815,7 @@ class SlotSkipTests(TestCase):
 
         self.assertEqual(self.snapshot(slot), before)
 
-    def test_skip_creates_no_iou_or_ledger_table(self):
+    def test_skip_creates_no_iou_or_ledger_row(self):
         slot = self.make_slot()
 
         skip_slot(
@@ -822,12 +824,7 @@ class SlotSkipTests(TestCase):
             datetime(2026, 9, 16, 18, 30, tzinfo=UTC),
         )
 
-        ledger_tables = {
-            table_name
-            for table_name in connection.introspection.table_names()
-            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
-        }
-        self.assertEqual(ledger_tables, set())
+        self.assertEqual(IOU.objects.count(), 0)
 
     @override_settings(TIME_ZONE="Asia/Tokyo")
     def test_naive_skip_timestamp_uses_configured_timezone(self):
@@ -890,6 +887,7 @@ class ClaimBountyTests(TransactionTestCase):
             end_date=date(2026, 9, 21),
         )
         self.listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+        self.claimed_at = datetime(2026, 9, 19, 10, 15, tzinfo=UTC)
 
     def make_slot(self, status=Slot.Status.BOUNTY, period=None):
         period = period or self.period
@@ -950,12 +948,127 @@ class ClaimBountyTests(TransactionTestCase):
         self.assertEqual(saved_slot.listed_at, self.listed_at)
         self.assertEqual(slot.listed_at, self.listed_at)
 
-        ledger_tables = {
-            table_name
-            for table_name in connection.introspection.table_names()
-            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
-        }
-        self.assertEqual(ledger_tables, set())
+        self.assertEqual(IOU.objects.count(), 0)
+
+    def test_claim_with_iou_writes_one_exact_snapshot(self):
+        slot = self.make_slot()
+
+        claimed_slot = slot.claim_with_iou(self.neighbor, self.claimed_at)
+
+        iou = IOU.objects.get(slot=slot)
+        self.assertEqual(claimed_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(iou.debtor_id, self.assignee.pk)
+        self.assertEqual(iou.creditor_id, self.neighbor.pk)
+        self.assertEqual(iou.amount, Decimal("14.3750"))
+        self.assertEqual(iou.claimed_at, self.claimed_at)
+        self.assertEqual(IOU.objects.count(), 1)
+
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.original_assignee_id, self.assignee.pk)
+        self.assertEqual(saved_slot.listed_at, self.listed_at)
+
+    def test_claim_with_iou_freezes_payout_and_completion_adds_no_iou(self):
+        slot = self.make_slot()
+        claim_bounty_with_iou(slot, self.neighbor, self.claimed_at)
+        iou = IOU.objects.get(slot=slot)
+
+        later_payout = calculate_bounty_payout(
+            Slot.objects.get(pk=slot.pk),
+            datetime(2026, 9, 21, 10, 15, tzinfo=UTC),
+        )
+        self.assertEqual(later_payout, Decimal("15.6250"))
+        self.assertNotEqual(iou.amount, later_payout)
+
+        complete_slot(
+            slot,
+            self.neighbor,
+            datetime(2026, 9, 20, 10, 15, tzinfo=UTC),
+        )
+
+        self.assertEqual(IOU.objects.count(), 1)
+        saved_iou = IOU.objects.get(slot=slot)
+        self.assertEqual(saved_iou.amount, Decimal("14.3750"))
+        self.assertEqual(saved_iou.debtor_id, self.assignee.pk)
+        self.assertEqual(saved_iou.creditor_id, self.neighbor.pk)
+        self.assertEqual(saved_iou.claimed_at, self.claimed_at)
+
+    def test_claim_with_iou_rejections_leave_slot_and_iou_unchanged(self):
+        slot = self.make_slot()
+
+        for claimant in (
+            self.assignee,
+            self.foreign_resident,
+            Resident(pk=999999),
+            Resident(display_name="Unsaved"),
+        ):
+            with self.subTest(claimant=claimant):
+                before = self.snapshot(slot)
+
+                with self.assertRaises(ValidationError):
+                    claim_bounty_with_iou(slot, claimant, self.claimed_at)
+
+                self.assertEqual(self.snapshot(slot), before)
+                self.assertEqual(IOU.objects.count(), 0)
+
+        for index, status in enumerate(
+            (
+                Slot.Status.ASSIGNED,
+                Slot.Status.CLAIMED,
+                Slot.Status.DONE,
+            ),
+            start=1,
+        ):
+            with self.subTest(status=status):
+                period = Period.objects.create(
+                    household=self.household,
+                    start_date=self.period.start_date + timedelta(days=7 * index),
+                    end_date=self.period.end_date + timedelta(days=7 * index),
+                )
+                unavailable_slot = self.make_slot(status=status, period=period)
+                before = self.snapshot(unavailable_slot)
+
+                with self.assertRaises(ValidationError):
+                    claim_bounty_with_iou(
+                        unavailable_slot,
+                        self.neighbor,
+                        self.claimed_at,
+                    )
+
+                self.assertEqual(self.snapshot(unavailable_slot), before)
+                self.assertEqual(IOU.objects.count(), 0)
+
+    def test_claim_with_iou_rolls_back_claim_when_iou_write_fails(self):
+        slot = self.make_slot()
+        before = self.snapshot(slot)
+
+        with (
+            patch.object(
+                IOU.objects,
+                "create",
+                side_effect=RuntimeError("IOU write failed"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            claim_bounty_with_iou(slot, self.neighbor, self.claimed_at)
+
+        self.assertEqual(self.snapshot(slot), before)
+        self.assertEqual(IOU.objects.count(), 0)
+
+    def test_repeated_claim_with_iou_keeps_one_winner_and_one_iou(self):
+        slot = self.make_slot()
+        claim_bounty_with_iou(slot, self.neighbor, self.claimed_at)
+        before = self.snapshot(slot)
+
+        with self.assertRaises(ValidationError):
+            claim_bounty_with_iou(
+                slot,
+                self.second_neighbor,
+                self.claimed_at + timedelta(minutes=1),
+            )
+
+        self.assertEqual(self.snapshot(slot), before)
+        self.assertEqual(IOU.objects.count(), 1)
+        self.assertEqual(IOU.objects.get(slot=slot).creditor_id, self.neighbor.pk)
 
     def test_assignee_cannot_claim_own_bounty(self):
         slot = self.make_slot()
@@ -1057,6 +1170,64 @@ class ClaimBountyTests(TransactionTestCase):
         self.assertEqual(saved_slot.original_assignee_id, before[2])
         self.assertEqual(saved_slot.listed_at, before[3])
         self.assertEqual(Slot.objects.filter(status=Slot.Status.CLAIMED).count(), 1)
+
+    @staticmethod
+    def _claim_with_iou_from_separate_connection(
+        barrier,
+        slot_id,
+        resident_id,
+        claimed_at,
+    ):
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            barrier.wait(timeout=10)
+            claim_bounty_with_iou(
+                Slot(pk=slot_id),
+                Resident(pk=resident_id),
+                claimed_at,
+            )
+        except ValidationError:
+            return "failure", resident_id
+        finally:
+            close_old_connections()
+
+        return "success", resident_id
+
+    def test_concurrent_claims_with_iou_have_one_winner_and_one_iou(self):
+        slot = self.make_slot()
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    self._claim_with_iou_from_separate_connection,
+                    barrier,
+                    slot.pk,
+                    resident.pk,
+                    self.claimed_at,
+                )
+                for resident in (self.neighbor, self.second_neighbor)
+            ]
+            outcomes = [future.result() for future in futures]
+
+        self.assertEqual(
+            [outcome[0] for outcome in outcomes].count("success"),
+            1,
+            outcomes,
+        )
+        self.assertEqual(
+            [outcome[0] for outcome in outcomes].count("failure"),
+            1,
+        )
+        winner_id = next(
+            resident_id for outcome, resident_id in outcomes if outcome == "success"
+        )
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(saved_slot.current_holder_id, winner_id)
+        self.assertEqual(IOU.objects.count(), 1)
+        self.assertEqual(IOU.objects.get(slot=slot).creditor_id, winner_id)
 
 
 class SlotCompletionTests(TestCase):
@@ -1204,17 +1375,12 @@ class SlotCompletionTests(TestCase):
         )
         self.assertEqual(CompletionHistory.objects.count(), 2)
 
-    def test_successful_completion_leaves_no_iou_or_ledger_table(self):
+    def test_successful_completion_leaves_no_iou_or_ledger_row(self):
         slot = self.make_slot(status=Slot.Status.CLAIMED)
 
         complete_slot(slot, self.claimed_holder, self.completed_at)
 
-        ledger_tables = {
-            table_name
-            for table_name in connection.introspection.table_names()
-            if table_name.rsplit("_", 1)[-1].lower() in {"iou", "ledger"}
-        }
-        self.assertEqual(ledger_tables, set())
+        self.assertEqual(IOU.objects.count(), 0)
 
     @override_settings(TIME_ZONE="Asia/Tokyo")
     def test_naive_completion_timestamp_uses_configured_timezone(self):

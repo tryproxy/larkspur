@@ -23,6 +23,11 @@ def validate_aware_datetime(value):
         raise ValidationError("Last-done timestamp must be timezone-aware.")
 
 
+def validate_claimed_at(value):
+    if not timezone.is_aware(value):
+        raise ValidationError("Claimed timestamp must be timezone-aware.")
+
+
 def _join_date_at_local_midnight(join_date):
     return timezone.make_aware(
         datetime.combine(join_date, time.min),
@@ -314,6 +319,9 @@ class Slot(models.Model):
     def claim(self, claiming_resident):
         return claim_bounty(self, claiming_resident)
 
+    def claim_with_iou(self, claiming_resident, claimed_at):
+        return claim_bounty_with_iou(self, claiming_resident, claimed_at)
+
 
 class CompletionHistoryManager(models.Manager):
     def get_last_done_at(self, resident, chore):
@@ -357,6 +365,84 @@ class CompletionHistory(models.Model):
             )
 
     def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class IOU(models.Model):
+    slot = models.OneToOneField(
+        Slot,
+        on_delete=models.PROTECT,
+        related_name="iou",
+    )
+    debtor = models.ForeignKey(
+        Resident,
+        on_delete=models.PROTECT,
+        related_name="ious_as_debtor",
+    )
+    creditor = models.ForeignKey(
+        Resident,
+        on_delete=models.PROTECT,
+        related_name="ious_as_creditor",
+    )
+    amount = models.DecimalField(
+        decimal_places=6,
+        max_digits=20,
+        validators=[MinValueValidator(Decimal(0))],
+    )
+    claimed_at = models.DateTimeField(validators=[validate_claimed_at])
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=~models.Q(debtor=models.F("creditor")),
+                name="iou_debtor_differs_creditor",
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.slot_id or not self.debtor_id or not self.creditor_id:
+            return
+
+        slot = self.slot
+        household_ids = {
+            slot.period.household_id,
+            slot.chore.household_id,
+            self.debtor.household_id,
+            self.creditor.household_id,
+        }
+        if len(household_ids) > 1:
+            raise ValidationError("Slot, debtor, and creditor must share a household.")
+        if self.debtor_id == self.creditor_id:
+            raise ValidationError("An IOU debtor and creditor must differ.")
+        if slot.original_assignee_id != self.debtor_id:
+            raise ValidationError("The IOU debtor must be the slot assignee.")
+        if slot.current_holder_id != self.creditor_id:
+            raise ValidationError("The IOU creditor must be the slot holder.")
+        if slot.status not in (Slot.Status.CLAIMED, Slot.Status.DONE):
+            raise ValidationError("An IOU requires a claimed or done slot.")
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            try:
+                previous = type(self).objects.get(pk=self.pk)
+            except type(self).DoesNotExist:
+                pass
+            else:
+                snapshot_fields = (
+                    "slot_id",
+                    "debtor_id",
+                    "creditor_id",
+                    "amount",
+                    "claimed_at",
+                )
+                if any(
+                    getattr(self, field) != getattr(previous, field)
+                    for field in snapshot_fields
+                ):
+                    raise ValidationError("IOU snapshot fields are immutable.")
+
         self.full_clean()
         return super().save(*args, **kwargs)
 
@@ -540,6 +626,7 @@ def _claim_bounty_in_transaction(slot, claiming_resident):
                 listed_at__isnull=False,
                 period__household_id=resident.household_id,
                 chore__household_id=resident.household_id,
+                original_assignee__household_id=resident.household_id,
             )
             .exclude(original_assignee_id=resident.pk)
             .update(
@@ -582,6 +669,52 @@ def claim_bounty(slot, claiming_resident):
             # SQLite can still surface a database lock while two writers
             # contend. Roll back and retry so the loser can re-read the
             # committed state instead of losing both attempts.
+            connection.close()
+            if attempt == 2:
+                raise ValidationError("The bounty is no longer available.") from error
+        else:
+            break
+
+    slot.status = locked_slot.status
+    slot.current_holder_id = locked_slot.current_holder_id
+    slot.current_holder = resident
+    slot.original_assignee_id = locked_slot.original_assignee_id
+    slot.listed_at = locked_slot.listed_at
+    return locked_slot
+
+
+def claim_bounty_with_iou(slot, claiming_resident, claimed_at):
+    if not isinstance(slot, Slot) or slot.pk is None:
+        raise ValidationError("A persisted slot is required.")
+    if not isinstance(claiming_resident, Resident) or claiming_resident.pk is None:
+        raise ValidationError("A persisted claiming resident is required.")
+
+    claimed_at = _normalize_payout_timestamp(claimed_at)
+
+    for attempt in range(3):
+        try:
+            with transaction.atomic():
+                locked_slot, resident = _claim_bounty_in_transaction(
+                    slot,
+                    claiming_resident,
+                )
+                amount = calculate_bounty_payout(locked_slot, claimed_at)
+                if amount is None:
+                    raise ValidationError(
+                        "A claimed bounty must have a listing timestamp."
+                    )
+
+                IOU.objects.create(
+                    slot=locked_slot,
+                    debtor_id=locked_slot.original_assignee_id,
+                    creditor_id=resident.pk,
+                    amount=amount,
+                    claimed_at=claimed_at,
+                )
+        except OperationalError as error:
+            if not _is_sqlite_lock_error(error):
+                raise
+
             connection.close()
             if attempt == 2:
                 raise ValidationError("The bounty is no longer available.") from error
