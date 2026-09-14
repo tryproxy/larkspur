@@ -630,6 +630,164 @@ class BountyBoardViewTests(TestCase):
         self.assertEqual(IOU.objects.count(), 0)
 
 
+class LedgerViewTests(TestCase):
+    listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+    claim_at = datetime(2026, 9, 19, 10, 15, tzinfo=UTC)
+
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.05"))
+        self.debtor = self.make_resident("ledger-debtor", "Ledger Debtor")
+        self.creditor = self.make_resident("ledger-creditor", "Ledger Creditor")
+
+        self.foreign_household = Household.objects.create(daily_rate=Decimal(0))
+        self.foreign_debtor = self.make_resident(
+            "ledger-foreign-debtor",
+            "Foreign Debtor",
+            household=self.foreign_household,
+        )
+        self.foreign_creditor = self.make_resident(
+            "ledger-foreign-creditor",
+            "Foreign Creditor",
+            household=self.foreign_household,
+        )
+
+        self.period = self.make_period(self.household)
+        self.foreign_period = self.make_period(self.foreign_household)
+        self.client = Client()
+
+    def make_resident(self, username, display_name, household=None):
+        household = household or self.household
+        return Resident.objects.create(
+            household=household,
+            user=User.objects.create_user(username=username),
+            display_name=display_name,
+            join_date=date(2026, 9, 1),
+        )
+
+    def make_period(self, household):
+        return Period.objects.create(
+            household=household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+
+    def make_bounty(self, period, assignee, name, start_amount):
+        chore = Chore.objects.create(
+            household=period.household,
+            name=name,
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=start_amount,
+        )
+        return Slot.objects.create(
+            period=period,
+            chore=chore,
+            original_assignee=assignee,
+            status=Slot.Status.BOUNTY,
+            deadline=period.end_date,
+            listed_at=self.listed_at,
+        )
+
+    def test_ledger_shows_claim_snapshot_for_current_household_only(self):
+        slot = self.make_bounty(
+            self.period,
+            self.debtor,
+            "Ledger household bounty",
+            Decimal("12.50"),
+        )
+        foreign_slot = self.make_bounty(
+            self.foreign_period,
+            self.foreign_debtor,
+            "Foreign household bounty",
+            Decimal("40.00"),
+        )
+
+        claim_bounty_with_iou(slot, self.creditor, self.claim_at)
+        claim_bounty_with_iou(
+            foreign_slot,
+            self.foreign_creditor,
+            self.claim_at,
+        )
+        iou = IOU.objects.get(slot=slot)
+        foreign_iou = IOU.objects.get(slot=foreign_slot)
+        self.assertIsInstance(iou.amount, Decimal)
+        self.assertEqual(iou.amount, Decimal("14.3750"))
+        self.assertEqual(iou.claimed_at, self.claim_at)
+
+        self.household.daily_rate = Decimal("0.50")
+        self.household.save()
+        self.client.force_login(self.creditor.user)
+        response = self.client.get(reverse("ledger"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["ious"]), [iou])
+        self.assertContains(response, f'id="ledger-row-{iou.pk}"')
+        self.assertContains(
+            response,
+            f'<td data-field="debtor">{self.debtor.display_name}</td>',
+        )
+        self.assertContains(
+            response,
+            f'<td data-field="creditor">{self.creditor.display_name}</td>',
+        )
+        self.assertContains(
+            response,
+            f'<td data-field="amount">{iou.amount}</td>',
+        )
+        self.assertContains(response, "2026-09-19 10:15 UTC")
+        self.assertNotContains(response, self.foreign_debtor.display_name)
+        self.assertNotContains(response, self.foreign_creditor.display_name)
+        self.assertNotContains(response, str(foreign_iou.amount))
+        self.assertNotContains(response, "<form")
+        self.assertNotContains(response, "<button")
+        for action in ("Pay", "Settle", "Delete", "Edit", "bounty-claim"):
+            with self.subTest(action=action):
+                self.assertNotContains(response, action)
+
+    def test_ledger_requires_authentication_and_resident_mapping(self):
+        unauthenticated_response = self.client.get(reverse("ledger"))
+        self.assertEqual(unauthenticated_response.status_code, 302)
+
+        unmapped_user = User.objects.create_user(username="ledger-unmapped")
+        self.client.force_login(unmapped_user)
+        unmapped_response = self.client.get(reverse("ledger"))
+        self.assertEqual(unmapped_response.status_code, 403)
+
+    def test_ledger_is_read_only_and_accepts_get_only(self):
+        slot = self.make_bounty(
+            self.period,
+            self.debtor,
+            "Read-only ledger bounty",
+            Decimal("12.50"),
+        )
+        claim_bounty_with_iou(slot, self.creditor, self.claim_at)
+        before = list(
+            IOU.objects.values_list(
+                "slot_id",
+                "debtor_id",
+                "creditor_id",
+                "amount",
+                "claimed_at",
+            )
+        )
+        self.client.force_login(self.creditor.user)
+
+        response = self.client.post(reverse("ledger"))
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(
+            list(
+                IOU.objects.values_list(
+                    "slot_id",
+                    "debtor_id",
+                    "creditor_id",
+                    "amount",
+                    "claimed_at",
+                )
+            ),
+            before,
+        )
+
+
 class HouseholdAndResidentTests(TestCase):
     def test_household_residents_and_user_links_persist(self):
         household = Household.objects.create(daily_rate=Decimal("0.05"))

@@ -3,9 +3,10 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404, HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 
 from .models import (
+    IOU,
     Resident,
     Slot,
     calculate_bounty_payout,
@@ -141,6 +142,25 @@ def bounties(request):
         request,
         "chores/bounties.html",
         {"resident": resident, "bounties": bounty_rows},
+    )
+
+
+@login_required
+@require_GET
+def ledger(request):
+    resident = _resident_for_request(request)
+    ious = (
+        IOU.objects.select_related("slot", "debtor", "creditor")
+        .filter(
+            debtor__household_id=resident.household_id,
+            creditor__household_id=resident.household_id,
+        )
+        .order_by("-claimed_at", "-pk")
+    )
+    return render(
+        request,
+        "chores/ledger.html",
+        {"resident": resident, "ious": ious},
     )
 
 
