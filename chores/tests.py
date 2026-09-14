@@ -317,6 +317,319 @@ class MySlotsViewTests(TestCase):
         self.assertEqual(self.snapshot(slot), before)
 
 
+class BountyBoardViewTests(TestCase):
+    listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+    claim_at = datetime(2026, 9, 19, 10, 15, tzinfo=UTC)
+
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.05"))
+        self.assignee = self.make_resident("bounty-assignee", "Bounty Assignee")
+        self.neighbor = self.make_resident("bounty-neighbor", "Bounty Neighbor")
+        self.second_neighbor = self.make_resident(
+            "bounty-second-neighbor",
+            "Bounty Second Neighbor",
+        )
+        self.foreign_household = Household.objects.create(daily_rate=Decimal(0))
+        self.foreign_resident = Resident.objects.create(
+            household=self.foreign_household,
+            user=User.objects.create_user(username="bounty-foreign"),
+            display_name="Bounty Foreign",
+            join_date=date(2026, 9, 4),
+        )
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.foreign_period = Period.objects.create(
+            household=self.foreign_household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.client = Client()
+
+    def make_resident(self, username, display_name):
+        return Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username=username),
+            display_name=display_name,
+            join_date=date(2026, 9, 1),
+        )
+
+    def make_slot(
+        self,
+        name,
+        *,
+        status=Slot.Status.BOUNTY,
+        original_assignee=None,
+        current_holder=None,
+        period=None,
+        listed_at=None,
+        chore_household=None,
+        completed_by=None,
+    ):
+        period = period or self.period
+        original_assignee = original_assignee or self.assignee
+        chore_household = chore_household or period.household
+
+        if status == Slot.Status.BOUNTY:
+            listed_at = listed_at or self.listed_at
+            current_holder = None
+        elif status == Slot.Status.CLAIMED:
+            listed_at = listed_at or self.listed_at
+            current_holder = current_holder or self.neighbor
+        elif status == Slot.Status.ASSIGNED:
+            current_holder = current_holder or original_assignee
+        elif status == Slot.Status.DONE:
+            current_holder = current_holder or original_assignee
+            completed_by = completed_by or original_assignee
+
+        chore = Chore.objects.create(
+            household=chore_household,
+            name=name,
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        return Slot.objects.create(
+            period=period,
+            chore=chore,
+            original_assignee=original_assignee,
+            current_holder=current_holder,
+            completed_by=completed_by,
+            status=status,
+            deadline=period.end_date,
+            listed_at=listed_at,
+        )
+
+    def login_as(self, resident):
+        self.client.force_login(resident.user)
+
+    def snapshot(self, slot):
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        return (
+            saved_slot.status,
+            saved_slot.current_holder_id,
+            saved_slot.original_assignee_id,
+            saved_slot.listed_at,
+            list(
+                IOU.objects.order_by("pk").values_list(
+                    "slot_id",
+                    "debtor_id",
+                    "creditor_id",
+                    "amount",
+                    "claimed_at",
+                )
+            ),
+        )
+
+    def test_authenticated_resident_sees_only_available_household_bounties(self):
+        visible = self.make_slot("Visible bounty")
+        self.make_slot("Assigned hidden", status=Slot.Status.ASSIGNED)
+        self.make_slot(
+            "Claimed hidden",
+            status=Slot.Status.CLAIMED,
+            current_holder=self.neighbor,
+        )
+        self.make_slot("Done hidden", status=Slot.Status.DONE)
+        self.make_slot(
+            "Foreign bounty",
+            period=self.foreign_period,
+            original_assignee=self.foreign_resident,
+            chore_household=self.foreign_household,
+        )
+
+        self.login_as(self.neighbor)
+        with patch("chores.views.timezone.now", return_value=self.listed_at):
+            response = self.client.get(reverse("bounties"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, visible.chore.name)
+        self.assertContains(response, self.assignee.display_name)
+        self.assertContains(response, "12.50")
+        self.assertContains(response, f'id="bounty-row-{visible.pk}"')
+        self.assertContains(response, f'hx-target="#bounty-row-{visible.pk}"')
+        self.assertContains(response, 'hx-swap="delete"')
+        self.assertContains(
+            response,
+            'src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js"',
+        )
+        self.assertContains(
+            response,
+            'integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V"',
+        )
+        self.assertContains(response, "defer")
+        for hidden_name in (
+            "Assigned hidden",
+            "Claimed hidden",
+            "Done hidden",
+            "Foreign bounty",
+            self.foreign_resident.display_name,
+        ):
+            with self.subTest(hidden_name=hidden_name):
+                self.assertNotContains(response, hidden_name)
+
+    def test_listing_date_is_day_zero_and_uses_catalog_start_amount(self):
+        slot = self.make_slot("Day-zero bounty")
+        self.login_as(self.neighbor)
+
+        with patch(
+            "chores.views.timezone.now",
+            return_value=datetime(2026, 9, 16, 23, 59, tzinfo=UTC),
+        ):
+            response = self.client.get(reverse("bounties"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["bounties"][0]["payout"], Decimal("12.50"))
+        self.assertContains(response, "12.50")
+        self.assertNotContains(response, 'name="amount"')
+        self.assertNotContains(response, 'name="payout"')
+        self.assertEqual(Slot.objects.get(pk=slot.pk).listed_at, self.listed_at)
+
+    def test_later_local_date_uses_exact_decimal_simple_interest(self):
+        self.make_slot("Rising bounty")
+        self.login_as(self.neighbor)
+
+        with patch(
+            "chores.views.timezone.now",
+            return_value=datetime(2026, 9, 19, 10, 15, tzinfo=UTC),
+        ):
+            response = self.client.get(reverse("bounties"))
+
+        self.assertEqual(response.context["bounties"][0]["payout"], Decimal("14.3750"))
+        self.assertContains(response, "14.375")
+
+    def test_neighbor_claim_creates_iou_and_returns_row_removal_fragment(self):
+        slot = self.make_slot("Claimable neighbor bounty")
+        self.login_as(self.neighbor)
+
+        with patch("chores.views.timezone.now", return_value=self.claim_at):
+            response = self.client.post(
+                reverse("bounty-claim", args=[slot.pk]),
+                {"amount": "999999.99", "payout": "0.01"},
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"")
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        self.assertEqual(saved_slot.status, Slot.Status.CLAIMED)
+        self.assertEqual(saved_slot.current_holder_id, self.neighbor.pk)
+        self.assertEqual(saved_slot.original_assignee_id, self.assignee.pk)
+        self.assertEqual(saved_slot.listed_at, self.listed_at)
+        iou = IOU.objects.get(slot=slot)
+        self.assertEqual(iou.debtor_id, self.assignee.pk)
+        self.assertEqual(iou.creditor_id, self.neighbor.pk)
+        self.assertEqual(iou.amount, Decimal("14.3750"))
+        self.assertEqual(iou.claimed_at, self.claim_at)
+
+    def test_assignee_claim_is_rejected_without_mutation(self):
+        slot = self.make_slot("Assignee cannot claim")
+        before = self.snapshot(slot)
+        self.login_as(self.assignee)
+
+        with patch("chores.views.timezone.now", return_value=self.claim_at):
+            response = self.client.post(
+                reverse("bounty-claim", args=[slot.pk]),
+                {"amount": "999999.99"},
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_cross_household_claim_is_forbidden_without_mutation(self):
+        slot = self.make_slot(
+            "Foreign claim target",
+            period=self.foreign_period,
+            original_assignee=self.foreign_resident,
+            chore_household=self.foreign_household,
+        )
+        before = self.snapshot(slot)
+        self.login_as(self.neighbor)
+
+        response = self.client.post(
+            reverse("bounty-claim", args=[slot.pk]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_repeated_claim_is_rejected_without_new_iou(self):
+        slot = self.make_slot("Repeated claim")
+        self.login_as(self.neighbor)
+        claim_bounty_with_iou(slot, self.neighbor, self.claim_at)
+        before = self.snapshot(slot)
+
+        self.login_as(self.second_neighbor)
+        with patch("chores.views.timezone.now", return_value=self.claim_at):
+            response = self.client.post(
+                reverse("bounty-claim", args=[slot.pk]),
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_unauthenticated_requests_cannot_view_or_mutate(self):
+        slot = self.make_slot("Login required")
+        before = self.snapshot(slot)
+
+        get_response = self.client.get(reverse("bounties"))
+        post_response = self.client.post(reverse("bounty-claim", args=[slot.pk]))
+
+        self.assertEqual(get_response.status_code, 302)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_authenticated_user_without_resident_mapping_is_forbidden(self):
+        user = User.objects.create_user(username="bounty-unmapped")
+        self.client.force_login(user)
+        slot = self.make_slot("Unmapped actor target")
+        before = self.snapshot(slot)
+
+        get_response = self.client.get(reverse("bounties"))
+        post_response = self.client.post(reverse("bounty-claim", args=[slot.pk]))
+
+        self.assertEqual(get_response.status_code, 403)
+        self.assertEqual(post_response.status_code, 403)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_invalid_csrf_token_is_rejected_before_mutation(self):
+        slot = self.make_slot("CSRF protected")
+        before = self.snapshot(slot)
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.neighbor.user)
+
+        response = csrf_client.post(
+            reverse("bounty-claim", args=[slot.pk]),
+            {"csrfmiddlewaretoken": "invalid", "amount": "999999.99"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.snapshot(slot), before)
+
+    def test_unavailable_or_missing_slots_are_rejected_without_mutation(self):
+        unavailable = self.make_slot("Already assigned", status=Slot.Status.ASSIGNED)
+        before = self.snapshot(unavailable)
+        self.login_as(self.neighbor)
+
+        response = self.client.post(
+            reverse("bounty-claim", args=[unavailable.pk]),
+            HTTP_HX_REQUEST="true",
+        )
+        missing_response = self.client.post(
+            reverse("bounty-claim", args=[999999]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(missing_response.status_code, 404)
+        self.assertEqual(self.snapshot(unavailable), before)
+        self.assertEqual(IOU.objects.count(), 0)
+
+
 class HouseholdAndResidentTests(TestCase):
     def test_household_residents_and_user_links_persist(self):
         household = Household.objects.create(daily_rate=Decimal("0.05"))

@@ -1,0 +1,17 @@
+<tr id="bounty-row-{{ slot.pk }}" data-slot-id="{{ slot.pk }}">
+  <td data-field="chore">{{ slot.chore.name }}</td>
+  <td data-field="original-assignee">{{ slot.original_assignee.display_name }}</td>
+  <td data-field="payout">{{ payout }}</td>
+  <td data-field="actions">
+    <form
+      method="post"
+      action="{% url 'bounty-claim' slot_id=slot.pk %}"
+      hx-post="{% url 'bounty-claim' slot_id=slot.pk %}"
+      hx-target="#bounty-row-{{ slot.pk }}"
+      hx-swap="delete"
+    >
+      {% csrf_token %}
+      <button type="submit">Claim</button>
+    </form>
+  </td>
+</tr>

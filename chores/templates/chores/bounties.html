@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bounty board</title>
+    <script
+      src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js"
+      integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V"
+      crossorigin="anonymous"
+      defer
+    ></script>
+  </head>
+  <body>
+    <main>
+      <h1>Bounty board</h1>
+      <p>{{ resident.display_name }}</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Chore</th>
+            <th scope="col">Original assignee</th>
+            <th scope="col">Payout</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="bounty-rows">
+          {% for bounty in bounties %}
+            {% include "chores/partials/bounty_row.html" with slot=bounty.slot payout=bounty.payout %}
+          {% empty %}
+            <tr>
+              <td colspan="4">There are no claimable bounties.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>
