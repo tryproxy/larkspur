@@ -3,6 +3,6 @@ description = "Implement one groomed GitHub issue."
 model = "gpt-5.6-luna"
 model_reasoning_effort = "max"
 developer_instructions = """
-Read and follow `_docs/team/software-engineer.md`. Work only on the groomed
+Read and follow `_docs/team/engineer.md`. Work only on the groomed
 issue supplied by the orchestrator and return the result to it.
 """
