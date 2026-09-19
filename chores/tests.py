@@ -26,6 +26,7 @@ from .models import (
     claim_bounty,
     claim_bounty_with_iou,
     complete_slot,
+    create_one_off_chore,
     skip_slot,
 )
 
@@ -994,6 +995,116 @@ class ChoreCatalogTests(TestCase):
             chore.save()
 
         self.assertFalse(Chore.objects.filter(pk=chore.pk).exists())
+
+    def test_one_off_chore_persists_without_recurring_cadence(self):
+        due_date = date(2026, 9, 16)
+        chore = Chore.objects.create(
+            household=self.household,
+            name="Assemble shelf",
+            cadence=Chore.Cadence.ONE_OFF,
+            due_date=due_date,
+            start_amount=Decimal("8.00"),
+        )
+
+        saved_chore = Chore.objects.get(pk=chore.pk)
+        self.assertEqual(saved_chore.household_id, self.household.pk)
+        self.assertEqual(saved_chore.name, "Assemble shelf")
+        self.assertEqual(saved_chore.cadence, Chore.Cadence.ONE_OFF)
+        self.assertNotIn(
+            saved_chore.cadence,
+            (Chore.Cadence.WEEKLY, Chore.Cadence.BIWEEKLY),
+        )
+        self.assertIsNone(saved_chore.cadence_anchor)
+        self.assertEqual(saved_chore.due_date, due_date)
+        self.assertEqual(saved_chore.start_amount, Decimal("8.00"))
+
+    def test_create_one_off_chore_creates_exactly_one_persisted_chore(self):
+        due_date = date(2026, 9, 16)
+        chore = create_one_off_chore(
+            self.household,
+            "Assemble shelf",
+            Decimal("8.00"),
+            due_date,
+        )
+
+        self.assertEqual(Chore.objects.count(), 1)
+        saved_chore = Chore.objects.get()
+        self.assertEqual(saved_chore.pk, chore.pk)
+        self.assertEqual(saved_chore.household_id, self.household.pk)
+        self.assertEqual(saved_chore.name, "Assemble shelf")
+        self.assertEqual(saved_chore.cadence, Chore.Cadence.ONE_OFF)
+        self.assertIsNone(saved_chore.cadence_anchor)
+        self.assertEqual(saved_chore.due_date, due_date)
+        self.assertEqual(saved_chore.start_amount, Decimal("8.00"))
+
+    def test_one_off_chore_requires_due_date_and_forbids_cadence_anchor(self):
+        with self.assertRaises(ValidationError):
+            Chore(
+                household=self.household,
+                name="Assemble shelf",
+                cadence=Chore.Cadence.ONE_OFF,
+                start_amount=Decimal("8.00"),
+            ).save()
+
+        with self.assertRaises(ValidationError):
+            Chore(
+                household=self.household,
+                name="Assemble shelf",
+                cadence=Chore.Cadence.ONE_OFF,
+                cadence_anchor=date(2026, 9, 14),
+                due_date=date(2026, 9, 16),
+                start_amount=Decimal("8.00"),
+            ).save()
+
+        self.assertEqual(Chore.objects.count(), 0)
+
+    def test_recurring_chores_reject_due_date_and_keep_cadence_rules(self):
+        with self.assertRaises(ValidationError):
+            Chore(
+                household=self.household,
+                name="Clean kitchen",
+                cadence=Chore.Cadence.WEEKLY,
+                due_date=date(2026, 9, 16),
+                start_amount=Decimal("12.50"),
+            ).save()
+
+        with self.assertRaises(ValidationError):
+            Chore(
+                household=self.household,
+                name="Clean windows",
+                cadence=Chore.Cadence.BIWEEKLY,
+                cadence_anchor=date(2026, 9, 14),
+                due_date=date(2026, 9, 16),
+                start_amount=Decimal("25.00"),
+            ).save()
+
+        Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        Chore.objects.create(
+            household=self.household,
+            name="Clean windows",
+            cadence=Chore.Cadence.BIWEEKLY,
+            cadence_anchor=date(2026, 9, 14),
+            start_amount=Decimal("25.00"),
+        )
+
+        self.assertEqual(Chore.objects.count(), 2)
+        for cadence_anchor in (None, date(2026, 9, 15)):
+            with (
+                self.subTest(cadence_anchor=cadence_anchor),
+                self.assertRaises(ValidationError),
+            ):
+                Chore(
+                    household=self.household,
+                    name="Change sheets",
+                    cadence=Chore.Cadence.BIWEEKLY,
+                    cadence_anchor=cadence_anchor,
+                    start_amount=Decimal("10.00"),
+                ).save()
 
 
 class AdminSetupTests(TestCase):
@@ -2652,3 +2763,148 @@ class OpenWeekCommandTests(TestCase):
             for slot in period.slots.all()
         }
         self.assertEqual(assignments_after, assignments_before)
+
+
+class OpenWeekOneOffTests(TestCase):
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal(0))
+        self.residents = [
+            Resident.objects.create(
+                household=self.household,
+                user=User.objects.create_user(username=f"one-off-{index}"),
+                display_name=f"One Off Resident {index}",
+                join_date=join_date,
+            )
+            for index, join_date in enumerate(
+                (
+                    date(2026, 1, 1),
+                    date(2026, 1, 10),
+                    date(2026, 1, 20),
+                ),
+                start=1,
+            )
+        ]
+        self.weekly_chore = Chore.objects.create(
+            household=self.household,
+            name="Clean kitchen",
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+        CompletionHistory.objects.create(
+            resident=self.residents[0],
+            chore=self.weekly_chore,
+            last_done_at=datetime(2026, 9, 10, 12, tzinfo=UTC),
+        )
+        CompletionHistory.objects.create(
+            resident=self.residents[2],
+            chore=self.weekly_chore,
+            last_done_at=datetime(2026, 9, 12, 12, tzinfo=UTC),
+        )
+
+    def run_open_week(self, requested_date):
+        call_command(
+            "open_week",
+            "--date",
+            requested_date,
+            stdout=StringIO(),
+        )
+
+    def test_open_week_assigns_one_off_and_catalog_chore_once(self):
+        period_start = date(2026, 9, 14)
+        period_end = date(2026, 9, 21)
+        one_off = create_one_off_chore(
+            self.household,
+            "Assemble shelf",
+            Decimal("8.00"),
+            period_start,
+        )
+
+        self.run_open_week("2026-09-15")
+
+        period = Period.objects.get(
+            household=self.household,
+            start_date=period_start,
+        )
+        self.assertEqual(period.end_date, period_end)
+        slots = {slot.chore_id: slot for slot in period.slots.all()}
+        self.assertEqual(set(slots), {self.weekly_chore.pk, one_off.pk})
+
+        weekly_slot = slots[self.weekly_chore.pk]
+        one_off_slot = slots[one_off.pk]
+        self.assertEqual(weekly_slot.original_assignee_id, self.residents[1].pk)
+        self.assertEqual(one_off_slot.original_assignee_id, self.residents[0].pk)
+        for slot in slots.values():
+            with self.subTest(chore_id=slot.chore_id):
+                self.assertEqual(slot.status, Slot.Status.ASSIGNED)
+                self.assertEqual(slot.current_holder_id, slot.original_assignee_id)
+                self.assertIsNone(slot.listed_at)
+                self.assertEqual(slot.deadline, period.end_date)
+
+        for slot in period.slots.all():
+            slot.original_assignee = self.residents[2]
+            slot.current_holder = self.residents[2]
+            slot.save()
+        assignments_before = {
+            slot.chore_id: (
+                slot.original_assignee_id,
+                slot.current_holder_id,
+            )
+            for slot in period.slots.all()
+        }
+
+        self.run_open_week("2026-09-15")
+
+        self.assertEqual(Period.objects.filter(household=self.household).count(), 1)
+        self.assertEqual(Slot.objects.filter(period=period).count(), 2)
+        assignments_after = {
+            slot.chore_id: (
+                slot.original_assignee_id,
+                slot.current_holder_id,
+            )
+            for slot in period.slots.all()
+        }
+        self.assertEqual(assignments_after, assignments_before)
+
+        one_off_slot = Slot.objects.get(pk=one_off_slot.pk)
+        complete_slot(
+            one_off_slot,
+            self.residents[2],
+            datetime(2026, 9, 16, 18, 30, tzinfo=UTC),
+        )
+
+        self.run_open_week("2026-09-22")
+
+        later_period = Period.objects.get(
+            household=self.household,
+            start_date=period_end,
+        )
+        self.assertEqual(Period.objects.filter(household=self.household).count(), 2)
+        self.assertEqual(Slot.objects.filter(chore=one_off).count(), 1)
+        self.assertFalse(later_period.slots.filter(chore=one_off).exists())
+        self.assertTrue(later_period.slots.filter(chore=self.weekly_chore).exists())
+
+    def test_open_week_includes_monday_and_excludes_next_monday(self):
+        monday = date(2026, 9, 14)
+        next_monday = date(2026, 9, 21)
+        included = create_one_off_chore(
+            self.household,
+            "Monday due",
+            Decimal("3.00"),
+            monday,
+        )
+        excluded = create_one_off_chore(
+            self.household,
+            "Next Monday due",
+            Decimal("4.00"),
+            next_monday,
+        )
+
+        self.run_open_week("2026-09-14")
+
+        period = Period.objects.get(
+            household=self.household,
+            start_date=monday,
+        )
+        self.assertTrue(period.slots.filter(chore=included).exists())
+        self.assertFalse(period.slots.filter(chore=excluded).exists())
+        self.assertTrue(period.slots.filter(chore=self.weekly_chore).exists())

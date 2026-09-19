@@ -29,6 +29,12 @@ def _is_due(chore, period_start):
     if chore.cadence == Chore.Cadence.WEEKLY:
         return True
 
+    if chore.cadence == Chore.Cadence.ONE_OFF:
+        if chore.due_date is None:
+            return False
+        period_end = period_start + timedelta(days=7)
+        return period_start <= chore.due_date < period_end
+
     if chore.cadence != Chore.Cadence.BIWEEKLY or chore.cadence_anchor is None:
         return False
 
@@ -89,7 +95,7 @@ def _open_period(household, period_start):
 
 
 class Command(BaseCommand):
-    help = "Open the Monday-based period for a date and assign due recurring chores."
+    help = "Open the Monday-based period for a date and assign due chores."
 
     def add_arguments(self, parser):
         parser.add_argument(

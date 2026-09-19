@@ -73,6 +73,7 @@ class Chore(models.Model):
     class Cadence(models.TextChoices):
         WEEKLY = "weekly", "Weekly"
         BIWEEKLY = "biweekly", "Biweekly"
+        ONE_OFF = "one_off", "One-off"
 
     household = models.ForeignKey(
         Household,
@@ -82,6 +83,7 @@ class Chore(models.Model):
     name = models.CharField(max_length=100, validators=[validate_chore_name])
     cadence = models.CharField(max_length=8, choices=Cadence.choices)
     cadence_anchor = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
     start_amount = models.DecimalField(
         decimal_places=2,
         max_digits=10,
@@ -90,6 +92,22 @@ class Chore(models.Model):
 
     def clean(self):
         super().clean()
+        if self.cadence == self.Cadence.ONE_OFF:
+            if self.cadence_anchor is not None:
+                raise ValidationError(
+                    {"cadence_anchor": "One-off chores cannot have a cadence anchor."}
+                )
+            if self.due_date is None:
+                raise ValidationError(
+                    {"due_date": "One-off chores require a due date."}
+                )
+            return
+
+        if self.due_date is not None:
+            raise ValidationError(
+                {"due_date": "Recurring chores cannot have a due date."}
+            )
+
         if self.cadence != self.Cadence.BIWEEKLY:
             return
 
@@ -105,6 +123,19 @@ class Chore(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+def create_one_off_chore(household, name, start_amount, due_date):
+    chore = Chore(
+        household=household,
+        name=name,
+        cadence=Chore.Cadence.ONE_OFF,
+        cadence_anchor=None,
+        due_date=due_date,
+        start_amount=start_amount,
+    )
+    chore.save()
+    return chore
 
 
 class Period(models.Model):
