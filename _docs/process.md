@@ -14,12 +14,9 @@ Labels
 Roles
 
 - Orchestrator - the main session; follows this lifecycle, coordinates the
-  `pm`, one implementation agent (`engineer` or `engineer-cursor-grok`), and
-  `qa`, and does not perform their work
+  `pm`, Cursor/Grok, and `qa`, and does not perform their work
 - PM - grooms a task before anyone implements it, follows _docs/team/pm.md
-- Engineer - implements one groomed task, follows _docs/team/engineer.md
-- Engineer-Cursor-Grok - dispatches one groomed task to Cursor Agent using
-  `cursor-grok-4.6-xhigh`, follows _docs/team/engineer.md
+- Engineer (Cursor/Grok) - implements one groomed task; follows _docs/team/engineer.md
 - QA - verifies the issue; follows _docs/team/qa.md
 
 Lifecycle
@@ -37,12 +34,14 @@ For issue selection:
 
 1. Pick the next eligible issue using the rule above
 2. PM grooms it
-3. The selected Engineer or Engineer-Cursor-Grok implements it
+3. Orchestrator sends the groomed issue (and any QA `FAIL` on retries) via
+   `.tools/cursor-grok --prompt-file`. The prompt directs Cursor/Grok to follow
+   `_docs/team/engineer.md`. Orchestrator reviews the changes and runs verification
 4. QA verifies it
 5. On FAIL, back to step 3 with the QA comment as input
 6. On PASS, QA marks every acceptance criterion as checked in the issue body,
    then closes the issue
-7. Repeat until no eligible open `mvp` issues remain
+7. Repeat until no eligible open `showcase` issues remain
 
 Rules
 
