@@ -27,6 +27,7 @@ from .models import (
     claim_bounty_with_iou,
     complete_slot,
     create_one_off_chore,
+    leave_resident,
     skip_slot,
 )
 
@@ -2908,3 +2909,281 @@ class OpenWeekOneOffTests(TestCase):
         self.assertTrue(period.slots.filter(chore=included).exists())
         self.assertFalse(period.slots.filter(chore=excluded).exists())
         self.assertTrue(period.slots.filter(chore=self.weekly_chore).exists())
+
+
+class ResidentLeaveTests(TestCase):
+    listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
+    claimed_at = datetime(2026, 9, 19, 10, 15, tzinfo=UTC)
+
+    def setUp(self):
+        self.household = Household.objects.create(daily_rate=Decimal("0.05"))
+        self.alice = self.make_resident("leave-alice", "Alice", date(2026, 1, 20))
+        self.bob = self.make_resident("leave-bob", "Bob", date(2026, 1, 10))
+        self.carol = self.make_resident("leave-carol", "Carol", date(2026, 1, 1))
+        self.period = Period.objects.create(
+            household=self.household,
+            start_date=date(2026, 9, 14),
+            end_date=date(2026, 9, 21),
+        )
+        self.assigned_chore = self.make_chore("Assigned leave chore")
+        self.bounty_chore = self.make_chore("Bounty leave chore")
+        self.claimed_chore = self.make_chore("Claimed leave chore")
+        self.done_chore = self.make_chore("Done leave chore")
+        self.later_chore = self.make_chore("Later period chore")
+
+        self.seed_history(self.assigned_chore, carol_done=date(2026, 1, 2))
+        self.seed_history(self.bounty_chore, carol_done=date(2026, 1, 3))
+        self.seed_history(self.claimed_chore, carol_done=date(2026, 1, 4))
+        self.seed_history(self.later_chore, carol_done=date(2026, 9, 12))
+
+    def make_resident(self, username, display_name, join_date):
+        return Resident.objects.create(
+            household=self.household,
+            user=User.objects.create_user(username=username),
+            display_name=display_name,
+            join_date=join_date,
+        )
+
+    def make_chore(self, name):
+        return Chore.objects.create(
+            household=self.household,
+            name=name,
+            cadence=Chore.Cadence.WEEKLY,
+            start_amount=Decimal("12.50"),
+        )
+
+    def seed_history(self, chore, carol_done):
+        CompletionHistory.objects.create(
+            resident=self.alice,
+            chore=chore,
+            last_done_at=datetime(2020, 1, 1, 12, tzinfo=UTC),
+        )
+        CompletionHistory.objects.create(
+            resident=self.bob,
+            chore=chore,
+            last_done_at=datetime(2026, 9, 10, 12, tzinfo=UTC),
+        )
+        CompletionHistory.objects.create(
+            resident=self.carol,
+            chore=chore,
+            last_done_at=datetime.combine(carol_done, datetime.min.time(), tzinfo=UTC),
+        )
+
+    def make_slot(
+        self,
+        chore,
+        *,
+        status=Slot.Status.ASSIGNED,
+        original_assignee=None,
+        current_holder=None,
+        period=None,
+        completed_by=None,
+    ):
+        period = period or self.period
+        original_assignee = original_assignee or self.alice
+        if status == Slot.Status.ASSIGNED:
+            current_holder = current_holder or original_assignee
+            listed_at = None
+        elif status == Slot.Status.BOUNTY:
+            current_holder = None
+            listed_at = self.listed_at
+        elif status == Slot.Status.CLAIMED:
+            current_holder = current_holder or self.bob
+            listed_at = self.listed_at
+        else:
+            current_holder = current_holder or original_assignee
+            listed_at = None
+            completed_by = completed_by or original_assignee
+
+        return Slot.objects.create(
+            period=period,
+            chore=chore,
+            original_assignee=original_assignee,
+            current_holder=current_holder,
+            completed_by=completed_by,
+            status=status,
+            deadline=period.end_date,
+            listed_at=listed_at,
+        )
+
+    def iou_snapshot(self):
+        return list(
+            IOU.objects.order_by("pk").values_list(
+                "pk",
+                "slot_id",
+                "debtor_id",
+                "creditor_id",
+                "amount",
+                "claimed_at",
+            )
+        )
+
+    def slot_snapshot(self, slot):
+        saved_slot = Slot.objects.get(pk=slot.pk)
+        return (
+            saved_slot.status,
+            saved_slot.original_assignee_id,
+            saved_slot.current_holder_id,
+            saved_slot.listed_at,
+            saved_slot.completed_by_id,
+            saved_slot.period_id,
+            saved_slot.chore_id,
+        )
+
+    def test_leave_records_departure_once_and_is_idempotent(self):
+        assigned = self.make_slot(self.assigned_chore)
+        done = self.make_slot(self.done_chore, status=Slot.Status.DONE)
+        first_left_on = date(2026, 9, 18)
+
+        leave_resident(self.alice, first_left_on)
+
+        saved_alice = Resident.objects.get(pk=self.alice.pk)
+        self.assertEqual(saved_alice.left_on, first_left_on)
+        self.assertEqual(self.alice.left_on, first_left_on)
+        self.assertIsNone(Resident.objects.get(pk=self.bob.pk).left_on)
+        self.assertIsNone(Resident.objects.get(pk=self.carol.pk).left_on)
+
+        assigned_after = self.slot_snapshot(assigned)
+        done_before_repeat = self.slot_snapshot(done)
+        iou_before_repeat = self.iou_snapshot()
+        slot_ids_before_repeat = list(
+            Slot.objects.order_by("pk").values_list("pk", flat=True)
+        )
+
+        leave_resident(self.alice, date(2026, 9, 21))
+        leave_resident(self.alice, first_left_on)
+
+        self.assertEqual(Resident.objects.get(pk=self.alice.pk).left_on, first_left_on)
+        self.assertEqual(self.slot_snapshot(assigned), assigned_after)
+        self.assertEqual(self.slot_snapshot(done), done_before_repeat)
+        self.assertEqual(self.iou_snapshot(), iou_before_repeat)
+        self.assertEqual(
+            list(Slot.objects.order_by("pk").values_list("pk", flat=True)),
+            slot_ids_before_repeat,
+        )
+
+    def test_unfinished_slots_are_reassigned_in_place_and_ious_are_preserved(self):
+        assigned = self.make_slot(self.assigned_chore)
+        bounty = self.make_slot(self.bounty_chore, status=Slot.Status.BOUNTY)
+        claimed = self.make_slot(self.claimed_chore, status=Slot.Status.BOUNTY)
+        done = self.make_slot(self.done_chore, status=Slot.Status.DONE)
+        claim_bounty_with_iou(claimed, self.bob, self.claimed_at)
+        iou = IOU.objects.get(slot=claimed)
+        iou_before = self.iou_snapshot()
+        slot_count_before = Slot.objects.count()
+        slot_ids_before = set(Slot.objects.values_list("pk", flat=True))
+
+        leave_resident(self.alice, date(2026, 9, 18))
+
+        for slot in (assigned, bounty, claimed):
+            with self.subTest(chore=slot.chore.name):
+                saved_slot = Slot.objects.get(pk=slot.pk)
+                self.assertEqual(saved_slot.status, Slot.Status.ASSIGNED)
+                self.assertEqual(saved_slot.original_assignee_id, self.carol.pk)
+                self.assertEqual(saved_slot.current_holder_id, self.carol.pk)
+                self.assertIsNone(saved_slot.listed_at)
+                self.assertEqual(saved_slot.period_id, self.period.pk)
+                self.assertEqual(saved_slot.chore_id, slot.chore_id)
+
+        saved_done = Slot.objects.get(pk=done.pk)
+        self.assertEqual(saved_done.status, Slot.Status.DONE)
+        self.assertEqual(saved_done.original_assignee_id, self.alice.pk)
+        self.assertEqual(saved_done.current_holder_id, self.alice.pk)
+        self.assertEqual(saved_done.completed_by_id, self.alice.pk)
+        self.assertEqual(Slot.objects.count(), slot_count_before)
+        self.assertEqual(
+            set(Slot.objects.values_list("pk", flat=True)), slot_ids_before
+        )
+        self.assertEqual(
+            Slot.objects.filter(period=self.period, chore=self.claimed_chore).count(),
+            1,
+        )
+        self.assertEqual(self.iou_snapshot(), iou_before)
+        saved_iou = IOU.objects.get(pk=iou.pk)
+        self.assertEqual(saved_iou.slot_id, claimed.pk)
+        self.assertEqual(saved_iou.debtor_id, self.alice.pk)
+        self.assertEqual(saved_iou.creditor_id, self.bob.pk)
+        self.assertEqual(saved_iou.amount, Decimal("14.3750"))
+        self.assertEqual(saved_iou.claimed_at, self.claimed_at)
+        saved_iou.full_clean()
+
+    def test_departed_resident_is_excluded_from_later_assignment_and_bounty_claim(self):
+        self.make_slot(self.assigned_chore)
+        leave_resident(self.alice, date(2026, 9, 18))
+
+        call_command("open_week", "--date", "2026-09-22", stdout=StringIO())
+
+        later_period = Period.objects.get(
+            household=self.household,
+            start_date=date(2026, 9, 21),
+        )
+        later_slot = later_period.slots.get(chore=self.later_chore)
+        self.assertNotEqual(later_slot.original_assignee_id, self.alice.pk)
+        self.assertEqual(later_slot.original_assignee_id, self.bob.pk)
+        self.assertEqual(later_slot.current_holder_id, self.bob.pk)
+        self.assertFalse(
+            later_period.slots.filter(original_assignee=self.alice).exists()
+        )
+
+        bounty = self.make_slot(
+            self.make_chore("Post-leave bounty"),
+            status=Slot.Status.BOUNTY,
+            original_assignee=self.bob,
+            period=later_period,
+        )
+        before = self.slot_snapshot(bounty)
+        iou_before = self.iou_snapshot()
+
+        with self.assertRaises(ValidationError):
+            claim_bounty(bounty, self.alice)
+        with self.assertRaises(ValidationError):
+            claim_bounty_with_iou(bounty, self.alice, self.claimed_at)
+
+        self.assertEqual(self.slot_snapshot(bounty), before)
+        self.assertEqual(self.iou_snapshot(), iou_before)
+
+    def test_leave_fails_atomically_when_no_active_replacement_exists(self):
+        assigned = self.make_slot(self.assigned_chore)
+        bounty = self.make_slot(self.bounty_chore, status=Slot.Status.BOUNTY)
+        claimed = self.make_slot(self.claimed_chore, status=Slot.Status.BOUNTY)
+        claim_bounty_with_iou(claimed, self.bob, self.claimed_at)
+        leave_resident(self.bob, date(2026, 9, 16))
+        leave_resident(self.carol, date(2026, 9, 17))
+
+        before_slots = {
+            slot.pk: self.slot_snapshot(slot) for slot in (assigned, bounty, claimed)
+        }
+        before_ious = self.iou_snapshot()
+        slot_count_before = Slot.objects.count()
+
+        with self.assertRaises(ValidationError):
+            leave_resident(self.alice, date(2026, 9, 18))
+
+        self.assertIsNone(Resident.objects.get(pk=self.alice.pk).left_on)
+        self.assertEqual(
+            Resident.objects.get(pk=self.bob.pk).left_on, date(2026, 9, 16)
+        )
+        self.assertEqual(
+            Resident.objects.get(pk=self.carol.pk).left_on, date(2026, 9, 17)
+        )
+        self.assertEqual(
+            {slot.pk: self.slot_snapshot(slot) for slot in (assigned, bounty, claimed)},
+            before_slots,
+        )
+        self.assertEqual(self.iou_snapshot(), before_ious)
+        self.assertEqual(Slot.objects.count(), slot_count_before)
+
+    @override_settings(TIME_ZONE="Asia/Tokyo")
+    def test_derived_leave_date_uses_configured_timezone(self):
+        frozen = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
+
+        with (
+            timezone.override("UTC"),
+            patch("chores.models.timezone.now", return_value=frozen),
+        ):
+            leave_resident(self.alice, None)
+
+        self.assertEqual(
+            Resident.objects.get(pk=self.alice.pk).left_on,
+            date(2026, 9, 20),
+        )

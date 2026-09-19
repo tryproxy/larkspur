@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -63,6 +63,7 @@ class Resident(models.Model):
         validators=[validate_display_name],
     )
     join_date = models.DateField()
+    left_on = models.DateField(null=True, blank=True)
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -447,6 +448,8 @@ class IOU(models.Model):
             raise ValidationError("Slot, debtor, and creditor must share a household.")
         if self.debtor_id == self.creditor_id:
             raise ValidationError("An IOU debtor and creditor must differ.")
+        if self.pk is not None:
+            return
         if slot.original_assignee_id != self.debtor_id:
             raise ValidationError("The IOU debtor must be the slot assignee.")
         if slot.current_holder_id != self.creditor_id:
@@ -645,6 +648,9 @@ def _claim_bounty_in_transaction(slot, claiming_resident):
     except Resident.DoesNotExist as error:
         raise ValidationError("A persisted claiming resident is required.") from error
 
+    if resident.left_on is not None:
+        raise ValidationError("A departed resident cannot claim a bounty.")
+
     with transaction.atomic():
         # Make the guarded write the first database operation. SQLite does
         # not provide row locks for select_for_update(), so a prior shared
@@ -758,3 +764,101 @@ def claim_bounty_with_iou(slot, claiming_resident, claimed_at):
     slot.original_assignee_id = locked_slot.original_assignee_id
     slot.listed_at = locked_slot.listed_at
     return locked_slot
+
+
+def _normalize_leave_date(left_on):
+    if left_on is None:
+        return timezone.localdate(timezone=timezone.get_default_timezone())
+    if isinstance(left_on, datetime):
+        if timezone.is_naive(left_on):
+            left_on = timezone.make_aware(
+                left_on,
+                timezone.get_default_timezone(),
+            )
+        return timezone.localtime(
+            left_on,
+            timezone.get_default_timezone(),
+        ).date()
+    if isinstance(left_on, date):
+        return left_on
+    raise ValidationError("Departure date must be a date.")
+
+
+def _select_assignee_for_chore(residents, chore):
+    return min(
+        residents,
+        key=lambda resident: (
+            CompletionHistory.objects.get_last_done_at(resident, chore),
+            resident.pk,
+        ),
+    )
+
+
+def leave_resident(resident, left_on):
+    if not isinstance(resident, Resident) or resident.pk is None:
+        raise ValidationError("A persisted resident is required.")
+
+    left_on = _normalize_leave_date(left_on)
+
+    with transaction.atomic():
+        try:
+            locked_resident = Resident.objects.select_for_update().get(pk=resident.pk)
+        except Resident.DoesNotExist as error:
+            raise ValidationError("A persisted resident is required.") from error
+
+        if locked_resident.left_on is not None:
+            resident.left_on = locked_resident.left_on
+            return locked_resident
+
+        eligible = list(
+            Resident.objects.filter(
+                household_id=locked_resident.household_id,
+                left_on__isnull=True,
+            )
+            .exclude(pk=locked_resident.pk)
+            .order_by("pk")
+        )
+        affected_slots = list(
+            Slot.objects.select_for_update()
+            .select_related("period", "chore")
+            .filter(
+                period__household_id=locked_resident.household_id,
+                status__in=(
+                    Slot.Status.ASSIGNED,
+                    Slot.Status.BOUNTY,
+                    Slot.Status.CLAIMED,
+                ),
+            )
+            .filter(
+                models.Q(original_assignee_id=locked_resident.pk)
+                | models.Q(current_holder_id=locked_resident.pk)
+            )
+            .order_by("pk")
+        )
+
+        if affected_slots and not eligible:
+            raise ValidationError("No eligible active replacement is available.")
+
+        replacements = [
+            (slot, _select_assignee_for_chore(eligible, slot.chore))
+            for slot in affected_slots
+        ]
+        for slot, replacement in replacements:
+            slot.original_assignee = replacement
+            slot.current_holder = replacement
+            slot.status = Slot.Status.ASSIGNED
+            slot.listed_at = None
+            slot.save(
+                update_fields=(
+                    "original_assignee",
+                    "current_holder",
+                    "status",
+                    "listed_at",
+                )
+            )
+
+        locked_resident.left_on = left_on
+        locked_resident.save(update_fields=("left_on",))
+
+    resident.left_on = locked_resident.left_on
+    return locked_resident

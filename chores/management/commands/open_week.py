@@ -4,7 +4,14 @@ from datetime import date, timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from chores.models import Chore, CompletionHistory, Household, Period, Resident, Slot
+from chores.models import (
+    Chore,
+    Household,
+    Period,
+    Resident,
+    Slot,
+    _select_assignee_for_chore,
+)
 
 
 def _parse_iso_date(value):
@@ -53,13 +60,7 @@ def _select_assignee(residents, chore):
             f'Cannot assign chore "{chore.name}" because the household has no residents.'
         )
 
-    return min(
-        residents,
-        key=lambda resident: (
-            CompletionHistory.objects.get_last_done_at(resident, chore),
-            resident.pk,
-        ),
-    )
+    return _select_assignee_for_chore(residents, chore)
 
 
 def _open_period(household, period_start):
@@ -69,7 +70,12 @@ def _open_period(household, period_start):
         defaults={"end_date": period_start + timedelta(days=7)},
     )
 
-    residents = list(Resident.objects.filter(household=household).order_by("pk"))
+    residents = list(
+        Resident.objects.filter(
+            household=household,
+            left_on__isnull=True,
+        ).order_by("pk")
+    )
     chores = Chore.objects.filter(household=household).order_by("pk")
     slots_created = 0
 
