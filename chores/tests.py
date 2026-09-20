@@ -631,6 +631,23 @@ class BountyBoardViewTests(TestCase):
         self.assertEqual(self.snapshot(unavailable), before)
         self.assertEqual(IOU.objects.count(), 0)
 
+    def test_bounty_board_shows_ledger_link_to_existing_ledger_route(self):
+        self.login_as(self.neighbor)
+
+        response = self.client.get(reverse("bounties"))
+
+        self.assertEqual(response.status_code, 200)
+        ledger_url = reverse("ledger")
+        self.assertContains(
+            response,
+            f'<a href="{ledger_url}">Ledger</a>',
+            html=True,
+        )
+
+        ledger_response = self.client.get(ledger_url)
+        self.assertEqual(ledger_response.status_code, 200)
+        self.assertContains(ledger_response, "IOU ledger")
+
 
 class LedgerViewTests(TestCase):
     listed_at = datetime(2026, 9, 16, 18, 30, tzinfo=UTC)
