@@ -4,36 +4,166 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>IOU ledger</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+        color: #172033;
+        background: #f5f8f6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: linear-gradient(135deg, #f5f8f6 0%, #edf7f0 100%);
+      }
+
+      .ledger-page {
+        width: min(100% - 2rem, 60rem);
+        margin: 0 auto;
+        padding: 3rem 0;
+      }
+
+      .ledger-header {
+        margin-bottom: 1.5rem;
+      }
+
+      .ledger-kicker {
+        margin: 0 0 0.5rem;
+        color: #278443;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        color: #172033;
+        font-size: clamp(2rem, 5vw, 3rem);
+        letter-spacing: -0.04em;
+      }
+
+      .resident-name {
+        margin: 0.5rem 0 0;
+        color: #5d687b;
+        font-size: 1rem;
+      }
+
+      .ledger-card {
+        overflow-x: auto;
+        border: 1px solid #dce9df;
+        border-radius: 1rem;
+        background: #ffffff;
+        box-shadow: 0 1rem 2.5rem rgb(23 32 51 / 8%);
+      }
+
+      table {
+        width: 100%;
+        min-width: 38rem;
+        border-collapse: collapse;
+        text-align: left;
+      }
+
+      th,
+      td {
+        padding: 1.125rem 1.25rem;
+      }
+
+      th {
+        border-bottom: 1px solid #dce9df;
+        color: #5d687b;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      tbody tr + tr td {
+        border-top: 1px solid #edf1ee;
+      }
+
+      tbody tr:hover {
+        background: #f8fbf9;
+      }
+
+      td {
+        color: #344054;
+        font-size: 0.95rem;
+      }
+
+      td[data-field="amount"] {
+        color: #176b36;
+        font-size: 1.125rem;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      td[data-field="claimed-at"] {
+        color: #5d687b;
+        white-space: nowrap;
+      }
+
+      td[data-field="claimed-at"] time {
+        font-variant-numeric: tabular-nums;
+      }
+
+      td[colspan="4"] {
+        padding: 3rem 1.25rem;
+        color: #5d687b;
+        text-align: center;
+      }
+
+      @media (max-width: 42rem) {
+        .ledger-page {
+          padding: 2rem 0;
+        }
+
+        th,
+        td {
+          padding: 0.875rem 1rem;
+        }
+      }
+    </style>
   </head>
   <body>
-    <main>
-      <h1>IOU ledger</h1>
-      <p>{{ resident.display_name }}</p>
+    <main class="ledger-page">
+      <header class="ledger-header">
+        <p class="ledger-kicker">Household history</p>
+        <h1>IOU ledger</h1>
+        <p class="resident-name">{{ resident.display_name }}</p>
+      </header>
 
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Debtor</th>
-            <th scope="col">Creditor</th>
-            <th scope="col">Amount</th>
-            <th scope="col">Claimed at</th>
-          </tr>
-        </thead>
-        <tbody id="ledger-rows">
-          {% for iou in ious %}
-            <tr id="ledger-row-{{ iou.pk }}">
-              <td data-field="debtor">{{ iou.debtor.display_name }}</td>
-              <td data-field="creditor">{{ iou.creditor.display_name }}</td>
-              <td data-field="amount">{{ iou.amount }}</td>
-              <td data-field="claimed-at"><time datetime="{{ iou.claimed_at|date:"c" }}">{{ iou.claimed_at|date:"Y-m-d H:i e" }}</time></td>
-            </tr>
-          {% empty %}
+      <section class="ledger-card" aria-label="IOU history">
+        <table>
+          <thead>
             <tr>
-              <td colspan="4">There are no IOUs.</td>
+              <th scope="col">Debtor</th>
+              <th scope="col">Creditor</th>
+              <th scope="col">Amount</th>
+              <th scope="col">Claimed at</th>
             </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+          </thead>
+          <tbody id="ledger-rows">
+            {% for iou in ious %}
+              <tr id="ledger-row-{{ iou.pk }}">
+                <td data-field="debtor">{{ iou.debtor.display_name }}</td>
+                <td data-field="creditor">{{ iou.creditor.display_name }}</td>
+                <td data-field="amount">{{ iou.amount }}</td>
+                <td data-field="claimed-at"><time datetime="{{ iou.claimed_at|date:"c" }}">{{ iou.claimed_at|date:"Y-m-d H:i e" }}</time></td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="4">There are no IOUs.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
     </main>
   </body>
 </html>

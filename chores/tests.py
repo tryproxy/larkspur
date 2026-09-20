@@ -745,6 +745,19 @@ class LedgerViewTests(TestCase):
             with self.subTest(action=action):
                 self.assertNotContains(response, action)
 
+    def test_ledger_presentation_emphasizes_amount_and_has_readable_empty_state(self):
+        self.client.force_login(self.creditor.user)
+
+        response = self.client.get(reverse("ledger"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<main class="ledger-page">')
+        self.assertContains(response, '<section class="ledger-card"')
+        self.assertContains(response, "width: min(100% - 2rem, 60rem);")
+        self.assertContains(response, 'td[data-field="amount"]')
+        self.assertContains(response, "font-size: 1.125rem;")
+        self.assertContains(response, '<td colspan="4">There are no IOUs.</td>')
+
     def test_ledger_requires_authentication_and_resident_mapping(self):
         unauthenticated_response = self.client.get(reverse("ledger"))
         self.assertEqual(unauthenticated_response.status_code, 302)
