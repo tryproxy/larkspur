@@ -11,7 +11,9 @@ build/
 .idea/
 .vscode/
 *.swp
-.cursor/
+.cursor/*
+!.cursor/agents/
+!.cursor/agents/**
 .venv/
 .ruff_cache/
 __pycache__/

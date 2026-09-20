@@ -1,36 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() {
-  echo "Usage: .tools/cursor-grok <task> | --prompt-file <path>" >&2
-  exit 2
-}
-
-if [[ $# -eq 1 && $1 != --prompt-file ]]; then
-  task=$1
-elif [[ $# -eq 2 && $1 == --prompt-file ]]; then
-  [[ -f $2 && -r $2 ]] || {
-    echo "BLOCKED: prompt file is missing or unreadable: $2" >&2
-    exit 1
-  }
-  task=$(< "$2")
-else
-  usage
-fi
-
-[[ -n $task ]] || usage
-
-if ! command -v agent >/dev/null 2>&1; then
-  echo "BLOCKED: Cursor Agent CLI 'agent' is not on PATH." >&2
-  exit 127
-fi
-
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-
-exec agent -p \
-  --trust \
-  --auto-review \
-  --workspace "$repo_root" \
-  --model cursor-grok-4.6-xhigh \
-  --output-format text \
-  "$task"
+exec "$(dirname -- "${BASH_SOURCE[0]}")/cursor-relay" engineer "$@"
