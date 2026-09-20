@@ -28,7 +28,7 @@ case "$role" in
     backend=acp
     model=cursor-grok-4.6-high-fast
     role_doc=_docs/team/pm.md
-    approval=(--approval reject)
+    approval=(--approval broker --broker-role pm)
     ;;
   engineer)
     backend=cli
@@ -40,7 +40,7 @@ case "$role" in
     backend=acp
     model=cursor-grok-4.6-high-fast
     role_doc=_docs/team/qa.md
-    approval=(--approval reject)
+    approval=(--approval broker --broker-role qa)
     ;;
   *) usage ;;
 esac

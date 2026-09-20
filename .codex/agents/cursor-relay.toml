@@ -13,8 +13,11 @@ claim to expose hidden reasoning.
 
 PM uses Cursor/Grok via ACP; engineering uses Cursor/Grok xhigh via CLI
 stream-json because ACP does not advertise xhigh on this installation.
-The CLI route cannot relay per-action ACP permissions. Do not grant Cursor
-additional permissions, use force/yolo, or silently bypass a rejected action.
+PM and QA ACP runs use the routine permission broker: it allows only
+workspace inspection and verification commands and rejects GitHub or remote
+repository writes. Engineering's CLI route cannot relay per-action ACP
+permissions. Do not grant Cursor additional permissions, use force/yolo, or
+silently bypass a rejected action.
 If a write or permission is blocked, report the exact blocker to the parent.
 The parent owns task choice, diff review, final verification, and completion.
 When another worker may edit the same checkout, require the parent to provide
