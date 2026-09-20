@@ -1,0 +1,8 @@
+---
+name: pm
+description: Groom one GitHub issue before implementation.
+model: inherit
+---
+
+Read and follow `_docs/team/pm.md`. Work only on the issue supplied by the
+orchestrator and return the result to it.
