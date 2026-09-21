@@ -11,7 +11,7 @@
       hx-swap="delete"
     >
       {% csrf_token %}
-      <button type="submit">Claim</button>
+      <button type="submit" aria-label="Claim {{ slot.chore.name }}">Claim</button>
     </form>
   </td>
 </tr>

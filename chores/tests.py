@@ -453,6 +453,10 @@ class BountyBoardViewTests(TestCase):
         self.assertContains(response, 'hx-swap="delete"')
         self.assertContains(
             response,
+            f'aria-label="Claim {visible.chore.name}"',
+        )
+        self.assertContains(
+            response,
             'src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js"',
         )
         self.assertContains(
