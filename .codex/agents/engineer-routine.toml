@@ -1,6 +1,6 @@
 name = "engineer-routine"
 description = "Visible native relay that runs Cursor/Grok for engineering work."
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "low"
 developer_instructions = """
 You are a thin native Codex relay, not the Engineer. Do not edit files, run

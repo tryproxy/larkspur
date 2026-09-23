@@ -1,6 +1,6 @@
 name = "pm-routine"
 description = "Visible native relay that runs Cursor/Grok for PM work."
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "low"
 developer_instructions = """
 You are a thin native Codex relay, not the PM. Do not groom the issue yourself

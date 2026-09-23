@@ -1,7 +1,7 @@
 name = "cursor-relay"
 description = "Run one scoped PM, engineering, or QA task through Cursor/Grok and report its observable progress."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "low"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 developer_instructions = """
 You are a relay, not a PM, engineer, or QA. Do not groom issues, write code,
 run independent tests, verify issues, or decide whether the task is done.
